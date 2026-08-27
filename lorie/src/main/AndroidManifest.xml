@@ -14,12 +14,12 @@
         tools:ignore="DataExtractionRules,GoogleAppIndexingWarning">
         <activity
             android:name=".MainActivity"
-            android:taskAffinity=".MainActivity"
+            android:taskAffinity=""
             android:icon="@mipmap/lorie_ic_launcher"
             android:roundIcon="@mipmap/lorie_ic_launcher_round"
             android:label="@string/lorie_app_name"
             android:theme="@style/LorieAppTheme"
-            android:launchMode="singleInstance"
+            android:documentLaunchMode="intoExisting"
             android:supportsPictureInPicture="true"
             android:configChanges="fontScale|orientation|screenSize|keyboard|keyboardHidden|layoutDirection|locale|mcc|mnc|navigation|screenLayout|touchscreen|uiMode|smallestScreenSize|density"
             android:resizeableActivity="true"

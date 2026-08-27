@@ -10,6 +10,7 @@ import static com.termux.x11.LoriePreferences.ACTION_PREFERENCES_CHANGED;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.app.ActivityOptions;
 import android.app.AppOpsManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
@@ -82,14 +83,19 @@ import com.termux.x11.utils.KeyInterceptor;
 import com.termux.x11.utils.TermuxX11ExtraKeys;
 import com.termux.x11.utils.X11ToolbarViewPager;
 
+import java.lang.ref.WeakReference;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 @Keep @SuppressLint("ApplySharedPref")
 @SuppressWarnings({"deprecation", "unused"})
 public class MainActivity extends AppCompatActivity {
     public static final String ACTION_STOP = "com.termux.x11.ACTION_STOP";
     public static final String ACTION_CUSTOM = "com.termux.x11.ACTION_CUSTOM";
+    private static final String EXTRA_FREEFORM_RELAUNCHED = "com.termux.x11.EXTRA_FREEFORM_RELAUNCHED";
 
     public static Handler handler = new Handler();
     private final Runnable connectRetry = this::tryConnect;
@@ -159,15 +165,76 @@ public class MainActivity extends AppCompatActivity {
         content.invalidate();
     }
 
-    @SuppressLint("StaticFieldLeak")
-    private static MainActivity instance;
+    // "-tag <tag>" windows register here, keyed by tag ("" for the default window). Weakly
+    // held so a window that dies without deregistering isn't pinned in memory.
+    private static final Map<String, WeakReference<MainActivity>> instances = new HashMap<>();
+    private String tag = "";
 
-    public MainActivity() {
-        instance = this;
+    /** The window registered under the given "-tag" argument, or the default window for "". */
+    public static MainActivity getInstance(String tag) {
+        WeakReference<MainActivity> ref = instances.get(tag == null ? "" : tag);
+        return ref != null ? ref.get() : null;
     }
 
-    public static MainActivity getInstance() {
-        return instance;
+    /** Whichever window currently has input focus, or null if none does. */
+    public static MainActivity getFocusedInstance() {
+        for (WeakReference<MainActivity> ref : instances.values()) {
+            MainActivity a = ref.get();
+            if (a != null && a.hasWindowFocus())
+                return a;
+        }
+        return null;
+    }
+
+    /** The focused window, or any window that hasn't been garbage-collected yet, or null if none are alive. */
+    public static MainActivity getFocusedOrAnyInstance() {
+        MainActivity focused = getFocusedInstance();
+        if (focused != null)
+            return focused;
+        for (WeakReference<MainActivity> ref : instances.values()) {
+            MainActivity a = ref.get();
+            if (a != null)
+                return a;
+        }
+        return null;
+    }
+
+    private final Set<Integer> pressedKeys = new LinkedHashSet<>();
+
+    public void markKeyPressed(int keyCode) {
+        pressedKeys.add(keyCode);
+    }
+
+    public void markKeyReleased(int keyCode) {
+        pressedKeys.remove(keyCode);
+    }
+
+    /** The window that considers the given key code held down, if any. */
+    public static MainActivity getInstanceWithPressedKey(int keyCode) {
+        for (WeakReference<MainActivity> ref : instances.values()) {
+            MainActivity a = ref.get();
+            if (a != null && a.pressedKeys.contains(keyCode))
+                return a;
+        }
+        return null;
+    }
+
+    /** Whether any window still has a key held down. */
+    public static boolean anyInstanceHasPressedKeys() {
+        for (WeakReference<MainActivity> ref : instances.values()) {
+            MainActivity a = ref.get();
+            if (a != null && !a.pressedKeys.isEmpty())
+                return true;
+        }
+        return false;
+    }
+
+    public static void clearAllPressedKeys() {
+        for (WeakReference<MainActivity> ref : instances.values()) {
+            MainActivity a = ref.get();
+            if (a != null)
+                a.pressedKeys.clear();
+        }
     }
 
     /** Unwraps the {@link MainActivity} a view's {@link Context} was inflated with, if any. */
@@ -184,6 +251,31 @@ public class MainActivity extends AppCompatActivity {
     @SuppressLint({"AppCompatMethod", "ObsoleteSdkInt", "ClickableViewAccessibility", "WrongConstant", "UnspecifiedRegisterReceiverFlag"})
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // Tag comes from the launch Intent's data: either the host of a "termux-x11-window://<tag>"
+        // URI, or a bare schemeless value ("-d <tag>") used as the tag directly.
+        Uri docData = getIntent().getData();
+        if (docData != null && docData.getHost() != null)
+            tag = docData.getHost();
+        else if (docData != null && docData.getScheme() == null)
+            tag = docData.toString();
+        else
+            tag = "";
+
+        if (!tag.isEmpty() && !getIntent().getBooleanExtra(EXTRA_FREEFORM_RELAUNCHED, false)) {
+            Intent relaunch = new Intent(getIntent())
+                    .putExtra(EXTRA_FREEFORM_RELAUNCHED, true)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+            ActivityOptions opts = ActivityOptions.makeBasic();
+            try {
+                opts.getClass().getMethod("setLaunchWindowingMode", int.class).invoke(opts, 5); // WINDOWING_MODE_FREEFORM
+            } catch (ReflectiveOperationException ignored) {}
+            finish();
+            startActivity(relaunch, opts.toBundle());
+            return;
+        }
+
+        instances.put(tag, new WeakReference<>(this));
 
         prefs = ((TermuxX11Application) getApplication()).getPrefs(this);
         int modeValue = Integer.parseInt(prefs.touchMode.get()) - 1;
@@ -291,8 +383,7 @@ public class MainActivity extends AppCompatActivity {
         handler.removeCallbacks(screenIdleTimeoutCheck);
         if (mInputHandler != null)
             mInputHandler.onDestroy();
-        if (instance == this)
-            instance = null;
+        instances.values().removeIf(ref -> ref.get() == this);
         super.onDestroy();
     }
 
