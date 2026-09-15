@@ -17,6 +17,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
+import android.net.Uri;
 import android.util.Log;
 import android.view.Surface;
 
@@ -36,7 +37,9 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     private final Intent intent = createIntent();
     private boolean broadcastPending;
     private IBinder lifetime;
-    private final IBinder.DeathRecipient ownerDied = this::stopServer;
+    private boolean ready;
+    private boolean stopping;
+    private final IBinder.DeathRecipient ownerDied = this::stop;
 
     @Override public synchronized void retain(IBinder owner) throws RemoteException {
         if (System.getenv("MAGICDESK_X11_SESSION") == null)
@@ -49,7 +52,12 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         lifetime = owner;
     }
 
-    @Override public void stop() { stopServer(); }
+    @Override public void stop() {
+        handler.post(() -> {
+            stopping = true;
+            if (ready) stopServer();
+        });
+    }
     private native void stopServer();
 
     /**
@@ -65,9 +73,33 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     }
 
     CmdEntryPoint(String[] args) {
+        if (System.getenv("MAGICDESK_X11_AUTHORITY") != null) {
+            try {
+                Bundle response = hostCall("attach");
+                if (response == null || response.getBinder("owner") == null)
+                    throw new SecurityException("X11 startup is no longer owned");
+                retain(response.getBinder("owner"));
+            } catch (Exception e) {
+                Log.e("CmdEntryPoint", "X11 owner handshake failed", e);
+                System.exit(1);
+                return;
+            }
+        }
         if (!start(args))
             System.exit(1);
     }
+
+    private Bundle hostCall(String method) {
+        Bundle request = new Bundle();
+        request.putString("session", System.getenv("MAGICDESK_X11_SESSION"));
+        request.putBinder("server", this);
+        if ("ready".equals(method)) request.putString("display", displayName());
+        return ctx.getContentResolver().call(
+                Uri.parse("content://" + System.getenv("MAGICDESK_X11_AUTHORITY")),
+                method, System.getenv("MAGICDESK_X11_TOKEN"), request);
+    }
+
+    private native String displayName();
 
     @SuppressLint({"WrongConstant", "PrivateApi"})
     private Intent createIntent() {
@@ -89,7 +121,17 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
 
     private void sendBroadcast() {
         if (System.getenv("MAGICDESK_X11_SESSION") != null) {
-            handler.post(() -> sendBroadcast(intent));
+            handler.post(() -> {
+                ready = true;
+                if (stopping) { stopServer(); return; }
+                if (System.getenv("MAGICDESK_X11_AUTHORITY") == null) sendBroadcast(intent);
+                else try { hostCall("ready"); }
+                catch (RuntimeException error) {
+                    Log.e("CmdEntryPoint", "X11 readiness was rejected", error);
+                    stopping = true;
+                    stopServer();
+                }
+            });
             return;
         }
         // Called from native (the X server thread) on every knock on the port; coalesce

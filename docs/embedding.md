@@ -41,11 +41,13 @@ generates a fresh unpredictable token for each pending session and launches
 | `MAGICDESK_X11_PACKAGE` | Exact receiver application package |
 | `MAGICDESK_X11_SESSION` | Host-owned session identity |
 | `MAGICDESK_X11_TOKEN` | Pending-session authentication token |
+| `MAGICDESK_X11_AUTHORITY` | Optional host ContentProvider for an owned pre-start handoff |
 | `TMPDIR` | X socket/runtime directory in the selected Termux/container environment |
 | `XKB_CONFIG_ROOT` | Keyboard configuration files from that environment |
 
 The entry class is `com.termux.x11.CmdEntryPoint`. Use a distinct X display
-number per server. Do not inject the container's `LD_LIBRARY_PATH` into the
+number per server, or `-displayfd 1` to let Xorg atomically allocate a free one.
+Do not inject the container's `LD_LIBRARY_PATH` into the
 Android runtime; preserve the client's loader environment through upstream
 `XSTARTUP_LD_LIBRARY_PATH` and `XSTARTUP_LD_PRELOAD` when needed.
 
@@ -56,6 +58,16 @@ descriptor to `X11Session.connect`. The embedded path does not use the
 standalone app's fixed knock port or repeating readiness broadcasts. Tokens
 must not be placed in logs or persistent user settings. A production launcher
 must also cancel pending launches when its startup owner disappears.
+
+With `MAGICDESK_X11_AUTHORITY`, the server calls the host provider before
+starting Xorg: `call("attach", token, {session, server})` returns an `owner`
+Binder. The host validates its pending session, token and expected caller UID;
+an absent or cancelled launch is rejected before sockets are created. The
+server retains that Binder before native startup. Once Xorg is ready it calls
+`ready` with the same identity and the allocated numeric `display`. No readiness
+broadcast is used on this path. A stop received during native initialization is
+applied when the server becomes ready. The host owns the startup deadline and
+rejects late callbacks; server termination uses normal Xorg cleanup.
 
 Callbacks are delivered on the caller-supplied Executor. `onFrame` publishes
 changes to dimensions/availability, not every animation frame. Mouse positions

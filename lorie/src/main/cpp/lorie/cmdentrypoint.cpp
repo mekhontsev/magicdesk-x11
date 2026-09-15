@@ -660,6 +660,9 @@ void lorieListenForKnocks(void) {
 
 void registerCmdEntryPointNatives(JNIEnv *env) {
     static JNINativeMethod methods[] = {
+            {"displayName", "()Ljava/lang/String;", (void*)+[](JNIEnv* env, jobject) -> jstring {
+                return env->NewStringUTF(display);
+            }},
             {"stopServer", "()V", (void*)+[](JNIEnv*, jobject) {
                 QueueWorkProc(+[](__unused ClientPtr, __unused void*) -> Bool {
                     GiveUp(0);
