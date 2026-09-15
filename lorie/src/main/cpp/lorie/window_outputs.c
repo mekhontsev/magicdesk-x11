@@ -1,5 +1,6 @@
 #include <dix-config.h>
 #include <stdlib.h>
+#include <string.h>
 #include <windowstr.h>
 #include <dix.h>
 #include <resource.h>
@@ -8,54 +9,90 @@
 #include <inpututils.h>
 #include <compint.h>
 #include "lorie.h"
+#include "window_model.h"
 
 extern ScreenPtr pScreenPtr;
 extern DeviceIntPtr lorieMouse, lorieKeyboard;
 extern int ucs2keysym(long ucs);
 extern void lorieKeysymKeyboardEvent(KeySym keysym, int down);
 
+typedef struct WindowImage {
+    struct WindowImage* next;
+    XID window;
+    PixmapPtr pixmap;
+    DamagePtr damage;
+    Bool changed, used, redirected;
+} WindowImage;
+
+#define MAX_FAMILY_LAYERS LORIE_MAX_FAMILY_LAYERS
 typedef struct OutputSelection {
     struct OutputSelection* next;
     uint32_t id;
     XID window;
-    PixmapPtr pixmap;
-    DamagePtr damage;
-    Bool changed, seen, dead, redirected, resizePending;
+    Bool changed, seen, dead, resizePending;
     int width, height;
+    unsigned layerCount;
+    lorieEvent layers[MAX_FAMILY_LAYERS];
     uint64_t revision;
 } OutputSelection;
 
 static OutputSelection* selections;
+static WindowImage* images;
+
+void lorieOutputWindowDestroyed(XID id) {
+    // Output ownership ends with the resource, even when its XID is immediately reused.
+    for (OutputSelection* output = selections; output; output = output->next)
+        if (output->window == id) { output->dead = TRUE; output->changed = TRUE; }
+    for (WindowImage* image = images; image; image = image->next)
+        if (image->window == id) image->redirected = FALSE;
+}
 
 static void damageDestroyed(__unused DamagePtr damage, void* closure) {
-    OutputSelection* output = closure;
+    WindowImage* output = closure;
     output->pixmap = NULL;
     output->damage = NULL;
     output->changed = TRUE;
 }
 
 static void releaseSelection(OutputSelection* output) {
-    WindowPtr window = NULL;
-    if (output->damage) DamageDestroy(output->damage);
-    Bool retained = FALSE;
-    for (OutputSelection* other = selections; other; other = other->next)
-        if (other != output && other->window == output->window && other->redirected) retained = TRUE;
-    if (!retained && output->redirected && dixLookupWindow(&window, output->window,
-            serverClient, DixWriteAccess) == Success)
-        compUnredirectWindow(serverClient, window, CompositeRedirectAutomatic);
     free(output);
 }
 
+static void pruneImages(void) {
+    WindowImage** link = &images;
+    while (*link) {
+        WindowImage* image = *link;
+        if (image->used) {
+            image->changed = FALSE;
+            if (image->damage) DamageEmpty(image->damage);
+            link = &image->next;
+            continue;
+        }
+        *link = image->next;
+        if (image->damage) DamageDestroy(image->damage);
+        WindowPtr window = NULL;
+        if (image->redirected && dixLookupWindow(&window, image->window, serverClient, DixWriteAccess) == Success)
+            compUnredirectWindow(serverClient, window, CompositeRedirectAutomatic);
+        free(image);
+    }
+}
+
 void lorieResetOutputs(void) {
+    lorieWindowModelReset();
     while (selections) {
         OutputSelection* output = selections;
         selections = output->next;
         releaseSelection(output);
     }
+    for (WindowImage* image = images; image; image = image->next) image->used = FALSE;
+    pruneImages();
 }
 
 void lorieOutputCommand(const lorieEvent* event) {
-    if (!pScreenPtr || !pScreenPtr->root || !event->output.output) return;
+    if (!pScreenPtr || !pScreenPtr->root) return;
+    if (event->output.operation == LORIE_OUTPUT_OBSERVE) { lorieWindowModelObserve(); return; }
+    if (event->output.operation == LORIE_OUTPUT_CLOSE) { lorieWindowClose(event->output.window); return; }
+    if (!event->output.output) return;
     OutputSelection** link = &selections;
     while (*link && (*link)->id != event->output.output) link = &(*link)->next;
     OutputSelection* output = *link;
@@ -88,9 +125,7 @@ void lorieOutputCommand(const lorieEvent* event) {
             serverClient, DixWriteAccess) != Success) return;
     if (output->window && (event->output.operation == LORIE_OUTPUT_FOCUS ||
             event->output.operation == LORIE_OUTPUT_KEY || event->output.operation == LORIE_OUTPUT_TEXT || event->output.down)) {
-        XID above = Above;
-        ConfigureWindow(window, CWStackMode, &above, serverClient);
-        SetInputFocus(serverClient, lorieKeyboard, output->window, RevertToParent, CurrentTime, FALSE);
+        lorieWindowFocus(window);
     }
     if (event->output.operation == LORIE_OUTPUT_POINTER) {
         ValuatorMask mask;
@@ -134,49 +169,97 @@ void loriePrepareOutputs(void) {
     }
 }
 
+static WindowImage* imageFor(WindowPtr window) {
+    XID id = window == pScreenPtr->root ? 0 : window->drawable.id;
+    WindowImage* image = images;
+    while (image && image->window != id) image = image->next;
+    if (!image) {
+        image = calloc(1, sizeof(*image));
+        if (!image) return NULL;
+        image->window = id;
+        image->changed = TRUE;
+        image->next = images;
+        images = image;
+    }
+    image->used = TRUE;
+    if (id && !image->redirected)
+        image->redirected = compRedirectWindow(serverClient, window, CompositeRedirectAutomatic) == Success;
+    PixmapPtr pixmap = window->realized ? pScreenPtr->GetWindowPixmap(window) : NULL;
+    if (id && pixmap == pScreenPtr->GetScreenPixmap(pScreenPtr)) pixmap = NULL;
+    if (image->pixmap != pixmap) {
+        if (image->damage) DamageDestroy(image->damage);
+        image->pixmap = pixmap;
+        image->changed = TRUE;
+        if (pixmap) {
+            image->damage = DamageCreate(NULL, damageDestroyed, DamageReportNone, TRUE, pScreenPtr, image);
+            if (image->damage) DamageRegister(&pixmap->drawable, image->damage);
+        }
+    }
+    return image;
+}
+
+typedef struct {
+    WindowPtr owner;
+    unsigned count;
+    Bool changed;
+    WindowImage* images[MAX_FAMILY_LAYERS];
+    lorieEvent layers[MAX_FAMILY_LAYERS];
+} FamilyFrame;
+
+static void appendLayer(WindowPtr window, void* closure) {
+    FamilyFrame* frame = closure;
+    if (frame->count == MAX_FAMILY_LAYERS) return;
+    WindowImage* image = imageFor(window);
+    if (!image || !image->pixmap) return;
+    unsigned index = frame->count++;
+    frame->images[index] = image;
+    frame->changed |= image->changed || (image->damage && RegionNotEmpty(DamageRegion(image->damage)));
+    frame->layers[index].layer.t = EVENT_OUTPUT_LAYER;
+    frame->layers[index].layer.window = window->drawable.id;
+    frame->layers[index].layer.x = window->drawable.x - frame->owner->drawable.x;
+    frame->layers[index].layer.y = window->drawable.y - frame->owner->drawable.y;
+    frame->layers[index].layer.width = image->pixmap->drawable.width;
+    frame->layers[index].layer.height = image->pixmap->drawable.height;
+    frame->layers[index].layer.alpha = window->drawable.depth == 32;
+}
+
 void loriePublishOutputs(struct lorie_shared_server_state* state) {
+    for (WindowImage* image = images; image; image = image->next) image->used = FALSE;
     for (OutputSelection* output = selections; output; output = output->next) {
         WindowPtr window = pScreenPtr->root;
-        PixmapPtr pixmap = NULL;
+        FamilyFrame frame = {0};
         if (!output->dead && (!output->window || dixLookupWindow(&window,
                 output->window, serverClient, DixReadAccess) == Success)) {
             output->seen = TRUE;
-            if (output->window && !output->redirected) {
-                for (OutputSelection* other = selections; other; other = other->next)
-                    if (other != output && other->window == output->window && other->redirected) output->redirected = TRUE;
+            frame.owner = window;
+            if (window->realized) {
+                if (output->window) lorieWindowFamily(window, appendLayer, &frame);
+                else appendLayer(window, &frame);
             }
-            if (output->window && !output->redirected)
-                output->redirected = compRedirectWindow(serverClient, window,
-                        CompositeRedirectAutomatic) == Success;
-            if (window->realized) pixmap = pScreenPtr->GetWindowPixmap(window);
-        } else if (output->seen && !output->dead) {
-            output->dead = TRUE;
-            output->changed = TRUE;
-        }
-        if (output->window && pixmap == pScreenPtr->GetScreenPixmap(pScreenPtr)) pixmap = NULL;
-        if (output->pixmap != pixmap) {
-            if (output->damage) DamageDestroy(output->damage);
-            output->pixmap = pixmap;
-            output->changed = TRUE;
-            if (pixmap) {
-                output->damage = DamageCreate(NULL, damageDestroyed, DamageReportNone, TRUE, pScreenPtr, output);
-                if (output->damage) DamageRegister(&pixmap->drawable, output->damage);
-            }
-        }
-        if (!output->changed && (!output->damage || !RegionNotEmpty(DamageRegion(output->damage)))) continue;
-        lorie_mutex_lock(&state->lock, &state->lockingPid);
-        LorieBuffer* buffer = lorieExportPixmap(pixmap);
+        } else if (output->seen) output->dead = TRUE;
+        for (unsigned i = 0; i < frame.count; i++) frame.layers[i].layer.output = output->id;
+        if (!output->changed && !frame.changed && output->layerCount == frame.count
+                && !memcmp(output->layers, frame.layers, frame.count * sizeof(lorieEvent))) continue;
+        output->layerCount = frame.count;
+        memcpy(output->layers, frame.layers, frame.count * sizeof(lorieEvent));
         lorieEvent event = {.frame = {.t = EVENT_OUTPUT_FRAME, .output = output->id,
                 .window = output->window, .revision = ++output->revision}};
-        if (buffer) {
-            const LorieBuffer_Desc* desc = LorieBuffer_description(buffer);
-            event.frame.bufferId = desc->id;
-            event.frame.width = desc->width;
-            event.frame.height = desc->height;
+        lorie_mutex_lock(&state->lock, &state->lockingPid);
+        for (unsigned i = 0; i < frame.count; i++) {
+            LorieBuffer* buffer = lorieExportPixmap(frame.images[i]->pixmap);
+            if (!buffer) continue;
+            frame.layers[i].layer.bufferId = LorieBuffer_description(buffer)->id;
+            lorieSendOutputFrame(&frame.layers[i]);
+            if (frame.layers[i].layer.window == window->drawable.id) {
+                event.frame.bufferId = frame.layers[i].layer.bufferId;
+                event.frame.width = window->drawable.width;
+                event.frame.height = window->drawable.height;
+            }
         }
         lorie_mutex_unlock(&state->lock, &state->lockingPid);
+        // Commit the complete family atomically: no intermediate main-only frame.
         lorieSendOutputFrame(&event);
-        if (output->damage) DamageEmpty(output->damage);
         output->changed = FALSE;
     }
+    pruneImages();
 }

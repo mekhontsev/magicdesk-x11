@@ -51,6 +51,8 @@ static JNIEnv* serverEnv = nullptr;
 static jobject thiz = nullptr;
 static jmethodID sendBroadcast = nullptr;
 static jmethodID sendBroadcastDelayed = nullptr;
+static lorieEvent incoming;
+static size_t headerBytes;
 
 static jboolean start(JNIEnv *env, jobject self, jobjectArray args) {
     pthread_t t;
@@ -119,7 +121,8 @@ static jboolean start(JNIEnv *env, jobject self, jobjectArray args) {
     // No matter what tracer is attached.
     // In the case of gdb or lldb LD_PRELOAD is already set.
     // In the case of proot or proot-distro libtermux-exec in LD_PRELOAD will break linking.
-    if (access("/data/data/com.termux/files/usr/lib/libtermux-exec.so", F_OK) == 0 && !detectTracer()
+    if (!getenv("MAGICDESK_X11_SESSION") &&
+            access("/data/data/com.termux/files/usr/lib/libtermux-exec.so", F_OK) == 0 && !detectTracer()
             && !getenv("XSTARTUP_LD_PRELOAD"))
         setenv("LD_PRELOAD", "/data/data/com.termux/files/usr/lib/libtermux-exec.so", 1);
 
@@ -264,6 +267,7 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
     valuator_mask_zero(&mask);
 
     if (ready & X_NOTIFY_ERROR) {
+        headerBytes = 0;
         LorieBuffer* buf;
         InputThreadUnregisterDev(fd);
         close(fd);
@@ -275,7 +279,13 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
     }
 
     again:
-    if (read(fd, &e, sizeof(e)) == sizeof(e)) {
+    ssize_t count = recv(fd, (char*)&incoming + headerBytes, sizeof(incoming) - headerBytes, MSG_DONTWAIT);
+    if (count < 0 && (errno == EINTR || errno == EAGAIN)) return;
+    if (count <= 0) { handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+    headerBytes += count;
+    if (headerBytes == sizeof(incoming)) {
+        e = incoming;
+        headerBytes = 0;
         switch(e.type) {
             case EVENT_OUTPUT_COMMAND: {
                 auto* copy = (lorieEvent*) malloc(sizeof(e));
@@ -414,9 +424,19 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
                 lorieWakeServer();
                 break;
             case EVENT_CLIPBOARD_SEND: {
+                if (e.clipboardSend.count > 1024 * 1024) {
+                    handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr);
+                    return;
+                }
                 char *data = (char*) calloc(1, e.clipboardSend.count + 1);
-                read(conn_fd, data, e.clipboardSend.count);
-                data[e.clipboardSend.count] = 0;
+                if (!data) { handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+                size_t received = 0;
+                while (received < e.clipboardSend.count) {
+                    ssize_t count = recv(fd, data + received, e.clipboardSend.count - received, MSG_WAITALL);
+                    if (count < 0 && errno == EINTR) continue;
+                    if (count <= 0) { free(data); handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+                    received += count;
+                }
                 QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
                     // This must be done only on X server thread.
                     lorieHandleClipboardData((const char*) closure);
@@ -473,12 +493,23 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
     }
 }
 
+static bool sendData(const void* data, size_t size) {
+    while (size && conn_fd != -1) {
+        ssize_t count = send(conn_fd, data, size, MSG_NOSIGNAL);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { shutdown(conn_fd, SHUT_RDWR); return false; }
+        data = (const char*)data + count;
+        size -= count;
+    }
+    return size == 0;
+}
+
 void lorieSendClipboardData(const char* data) {
     if (data && conn_fd != -1) {
         size_t len = strlen(data);
+        if (len > 1024 * 1024) return;
         lorieEvent e = { .clipboardSend = { .t = EVENT_CLIPBOARD_SEND, .count = (uint32_t) len } };
-        write(conn_fd, &e, sizeof(e));
-        write(conn_fd, data, len);
+        if (sendData(&e, sizeof(e))) sendData(data, len);
     }
 }
 
@@ -514,7 +545,7 @@ void lorieSendSharedServerState(int memfd) {
 }
 
 void lorieSendOutputFrame(const lorieEvent* event) {
-    if (conn_fd != -1) send(conn_fd, event, sizeof(*event), MSG_NOSIGNAL);
+    sendData(event, sizeof(*event));
 }
 
 void lorieRegisterBuffer(LorieBuffer* buffer) {
@@ -562,6 +593,7 @@ static jobject getXConnection(JNIEnv *env, __unused jobject cls) {
             close(conn_fd);
         }
         lorieResetOutputs();
+        headerBytes = 0;
         LorieBuffer* buffer;
         while ((buffer = LorieBufferList_first(&registeredBuffers)))
             LorieBuffer_removeFromList(buffer);
@@ -598,10 +630,7 @@ static jobject getLogcatOutput(JNIEnv *env, __unused jobject cls) {
 }
 
 void lorieListenForKnocks(void) {
-    if (getenv("MAGICDESK_X11_SESSION")) {
-        serverEnv->CallVoidMethod(thiz, sendBroadcast);
-        return;
-    }
+    if (getenv("MAGICDESK_X11_SESSION")) return;
     struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(PORT), .sin_addr = { .s_addr = INADDR_ANY } };
     int fd, reuse = 1;
 
@@ -656,6 +685,10 @@ void lorieListenForKnocks(void) {
     }, X_NOTIFY_READ, NULL);
 
     serverEnv->CallVoidMethod(thiz, sendBroadcastDelayed);
+}
+
+void lorieEmbeddedServerReady(void) {
+    if (getenv("MAGICDESK_X11_SESSION")) serverEnv->CallVoidMethod(thiz, sendBroadcast);
 }
 
 void registerCmdEntryPointNatives(JNIEnv *env) {

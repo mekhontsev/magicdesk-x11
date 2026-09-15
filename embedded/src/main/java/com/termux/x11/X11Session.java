@@ -20,7 +20,11 @@ public final class X11Session implements AutoCloseable {
     public interface Listener {
         void onFrame(Output output, int width, int height, boolean available);
         void onDisconnected();
+        default void onWindowsChanged(java.util.List<Window> windows) { }
+        default void onClipboard(String text) { }
     }
+
+    public record Window(long id, String title, boolean mapped) { }
 
     private static final int BIND = 0, RESIZE = 1, POINTER = 2, KEY = 3, RELEASE = 4, FOCUS = 5;
     private final HandlerThread thread = new HandlerThread("X11Session");
@@ -28,12 +32,16 @@ public final class X11Session implements AutoCloseable {
     private final Executor callbacks;
     private final Listener listener;
     private final Map<Integer, Output> outputs = new LinkedHashMap<>();
+    private final Map<Integer, Window> windows = new LinkedHashMap<>();
     private final Object submissions = new Object();
     private FutureTask<Void> shutdown;
     private volatile boolean closed;
     private boolean connected;
     private int nextOutputId;
     private long nativeHandle;
+    private String clipboard = "";
+    private volatile boolean clipboardEnabled;
+    private boolean windowsChanged;
 
     public X11Session(Executor callbacks, Listener listener) {
         this.callbacks = java.util.Objects.requireNonNull(callbacks);
@@ -62,6 +70,8 @@ public final class X11Session implements AutoCloseable {
                     throw new IllegalStateException("Cannot connect X11 server");
                 }
                 connected = true;
+                windows.clear();
+                nativeCommand(nativeHandle, 0, 0, 7, 0, 0, 0, false);
                 for (Output output : outputs.values()) {
                     output.frameAvailable = -1;
                     output.send(BIND, 0, 0, 0, false);
@@ -72,6 +82,61 @@ public final class X11Session implements AutoCloseable {
         } catch (java.io.IOException e) {
             throw new IllegalStateException("Cannot close X11 connection descriptor", e);
         }
+    }
+
+    /** ICCCM WM_DELETE_WINDOW, or client termination when that protocol is unsupported. */
+    public void closeWindow(long windowId) {
+        if (windowId <= 0 || windowId > 0xffffffffL) throw new IllegalArgumentException("Invalid X11 window ID");
+        call(() -> {
+            if (!connected) throw new IllegalStateException("X11 server disconnected");
+            nativeCommand(nativeHandle, 0, (int)windowId, 8, 0, 0, 0, false);
+            return null;
+        });
+    }
+
+    private void onNativeWindow(int id, byte[] title, boolean removed, boolean mapped) {
+        if (removed) windows.remove(id);
+        else windows.put(id, new Window(Integer.toUnsignedLong(id), new String(title, java.nio.charset.StandardCharsets.UTF_8), mapped));
+        windowsChanged = true;
+    }
+
+    private void onNativeWindowsCommitted() {
+        if (!windowsChanged) return;
+        windowsChanged = false;
+        java.util.List<Window> snapshot = java.util.List.copyOf(windows.values());
+        callbacks.execute(() -> { if (!closed) listener.onWindowsChanged(snapshot); });
+    }
+
+    /** Only the focused Android host enables clipboard synchronization. */
+    public void setClipboardEnabled(boolean enabled) {
+        dispatch(() -> {
+            clipboardEnabled = enabled;
+            if (connected) nativeClipboard(nativeHandle, enabled ? 1 : 0, null);
+            return null;
+        }, true);
+    }
+
+    public void offerClipboard(String text) {
+        byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        if (bytes.length > 1024 * 1024 || text.indexOf('\0') >= 0)
+            throw new IllegalArgumentException("X11 clipboard text exceeds the protocol limit");
+        dispatch(() -> {
+            if (clipboardEnabled && connected && !text.equals(clipboard)) {
+                clipboard = text;
+                nativeClipboard(nativeHandle, 2, null);
+            }
+            return null;
+        }, true);
+    }
+
+    private void onNativeClipboardRequest() {
+        nativeClipboard(nativeHandle, 3, (clipboardEnabled ? clipboard : "").getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    private void onNativeClipboard(byte[] data) {
+        String text = new String(data, java.nio.charset.StandardCharsets.UTF_8);
+        clipboard = text;
+        callbacks.execute(() -> { if (!closed && clipboardEnabled) listener.onClipboard(text); });
     }
 
     /** XID zero selects the whole X screen, not an Android display ID. */
@@ -247,5 +312,6 @@ public final class X11Session implements AutoCloseable {
     private static native void nativeSurface(long handle, int output, Surface surface, boolean release);
     private static native void nativeCommand(long handle, int output, int window, int operation, int x, int y, int detail, boolean down);
     private static native void nativeText(long handle, int output, int window, String text);
+    private static native void nativeClipboard(long handle, int operation, byte[] text);
     private static native void nativeDestroy(long handle);
 }

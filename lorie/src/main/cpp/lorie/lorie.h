@@ -118,6 +118,9 @@ typedef enum {
     EVENT_SYNC_REPLY,
     EVENT_OUTPUT_COMMAND,
     EVENT_OUTPUT_FRAME,
+    EVENT_OUTPUT_LAYER,
+    EVENT_OUTPUT_WINDOW,
+    EVENT_OUTPUT_WINDOWS_DONE,
 } eventType;
 
 typedef union {
@@ -188,11 +191,27 @@ typedef union {
         uint32_t output, window, width, height;
         uint64_t bufferId, revision;
     } frame;
+    struct {
+        uint8_t t, alpha;
+        uint32_t output, window, width, height;
+        int32_t x, y;
+        uint64_t bufferId;
+    } layer;
+    struct {
+        uint8_t t, removed, mapped;
+        uint32_t window;
+        char title[256];
+    } windowInfo;
 } lorieEvent;
 
+#define LORIE_MAX_FAMILY_LAYERS 256
+
 enum { LORIE_OUTPUT_BIND, LORIE_OUTPUT_RESIZE, LORIE_OUTPUT_POINTER,
-    LORIE_OUTPUT_KEY, LORIE_OUTPUT_RELEASE, LORIE_OUTPUT_FOCUS, LORIE_OUTPUT_TEXT };
+    LORIE_OUTPUT_KEY, LORIE_OUTPUT_RELEASE, LORIE_OUTPUT_FOCUS, LORIE_OUTPUT_TEXT,
+    LORIE_OUTPUT_OBSERVE, LORIE_OUTPUT_CLOSE };
 void lorieOutputCommand(const lorieEvent* event);
+void lorieEmbeddedServerReady(void);
+void lorieOutputWindowDestroyed(XID id);
 void loriePrepareOutputs(void);
 void loriePublishOutputs(struct lorie_shared_server_state* state);
 void lorieResetOutputs(void);
@@ -295,6 +314,8 @@ struct Renderer {
         bool changed = false;
         bool released = false;
         lorieEvent frame{};
+        lorieEvent layers[LORIE_MAX_FAMILY_LAYERS]{}, pendingLayers[LORIE_MAX_FAMILY_LAYERS]{};
+        unsigned layerCount = 0, pendingCount = 0;
         uint64_t drawnRevision = 0;
     };
     Output* outputs = nullptr;

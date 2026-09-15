@@ -5,6 +5,7 @@
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
 #include <cstdlib>
+#include <cstring>
 #include <new>
 #include "lorie.h"
 
@@ -48,7 +49,16 @@ bool Renderer::setOutputSurface(JNIEnv* env, uint32_t id, jobject surface, bool 
 void Renderer::setOutputFrame(const lorieEvent& event) {
     pthread_mutex_lock(&stateLock);
     for (Output* output = outputs; output; output = output->next) {
-        if (output->id == event.frame.output) { output->frame = event; break; }
+        if (output->id != event.frame.output) continue;
+        if (event.type == EVENT_OUTPUT_LAYER) {
+            if (output->pendingCount < LORIE_MAX_FAMILY_LAYERS) output->pendingLayers[output->pendingCount++] = event;
+        } else {
+            output->frame = event;
+            output->layerCount = output->pendingCount;
+            memcpy(output->layers, output->pendingLayers, output->layerCount * sizeof(lorieEvent));
+            output->pendingCount = 0;
+        }
+        break;
     }
     pthread_cond_signal(stateCond);
     pthread_mutex_unlock(&stateLock);
@@ -100,9 +110,6 @@ void Renderer::drawOutputs() {
         const auto& frame = output->frame.frame;
         if (output->surface == EGL_NO_SURFACE || output->drawnRevision == frame.revision) continue;
         lorie_mutex_lock(&state->lock, &state->lockingPid);
-        pthread_spin_lock(&bufferLock);
-        LorieBuffer* buffer = frame.width && frame.height ? LorieBufferList_findById(&buffers, frame.bufferId) : nullptr;
-        pthread_spin_unlock(&bufferLock);
         if (!eglMakeCurrent(egl_display, output->surface, output->surface, ctx)) {
             output->drawnRevision = frame.revision;
             lorie_mutex_unlock(&state->lock, &state->lockingPid);
@@ -114,15 +121,32 @@ void Renderer::drawOutputs() {
         glViewport(0, 0, width, height);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
-        if (buffer) {
-            const auto* desc = LorieBuffer_description(buffer);
-            LorieBuffer_bindTexture(buffer);
-            float right = desc->type == LORIEBUFFER_FD ? (float)desc->width / desc->stride : 1.f;
+        if (frame.width && frame.height) {
             float x = 1.f, y = 1.f;
             if ((int64_t)width * frame.height > (int64_t)height * frame.width)
                 x = (float)height * frame.width / (width * (float)frame.height);
             else y = (float)width * frame.height / (height * (float)frame.width);
-            drawRegion(0, -x, -y, x, y, 0, 0, right, 1, LorieBuffer_isRgba(buffer));
+            glEnable(GL_SCISSOR_TEST);
+            glScissor((int)((1.f - x) * width / 2), (int)((1.f - y) * height / 2),
+                    (int)(x * width), (int)(y * height));
+            for (unsigned i = 0; i < output->layerCount; i++) {
+                const auto& layer = output->layers[i].layer;
+                pthread_spin_lock(&bufferLock);
+                LorieBuffer* buffer = LorieBufferList_findById(&buffers, layer.bufferId);
+                pthread_spin_unlock(&bufferLock);
+                if (!buffer) continue;
+                const auto* desc = LorieBuffer_description(buffer);
+                LorieBuffer_bindTexture(buffer);
+                float right = desc->type == LORIEBUFFER_FD ? (float)desc->width / desc->stride : 1.f;
+                if (layer.alpha) { glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); }
+                else glDisable(GL_BLEND);
+                drawRegion(0, -x + 2*x*layer.x/frame.width, -y + 2*y*layer.y/frame.height,
+                        -x + 2*x*(layer.x + (float)layer.width)/frame.width,
+                        -y + 2*y*(layer.y + (float)layer.height)/frame.height,
+                        0, 0, right, 1, LorieBuffer_isRgba(buffer));
+            }
+            glDisable(GL_BLEND);
+            glDisable(GL_SCISSOR_TEST);
         }
         EGLSyncKHR fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
         glFlush();

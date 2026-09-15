@@ -11,14 +11,20 @@ struct SessionConnection {
     volatile int fd = -1;
     lorieEvent header{};
     size_t headerBytes = 0;
+    char* clipboard = nullptr;
+    size_t clipboardBytes = 0, clipboardSize = 0;
     JNIEnv* env;
     jobject owner;
-    jmethodID frameCallback, closedCallback;
+    jmethodID frameCallback, closedCallback, windowCallback, windowsCallback, clipboardCallback, clipboardRequestCallback;
 
     SessionConnection(JNIEnv* e, jobject object) : env(e), owner(e->NewGlobalRef(object)) {
         jclass cls = env->GetObjectClass(owner);
         frameCallback = env->GetMethodID(cls, "onNativeFrame", "(IIIII)V");
         closedCallback = env->GetMethodID(cls, "onNativeDisconnected", "()V");
+        windowCallback = env->GetMethodID(cls, "onNativeWindow", "(I[BZZ)V");
+        windowsCallback = env->GetMethodID(cls, "onNativeWindowsCommitted", "()V");
+        clipboardCallback = env->GetMethodID(cls, "onNativeClipboard", "([B)V");
+        clipboardRequestCallback = env->GetMethodID(cls, "onNativeClipboardRequest", "()V");
         env->DeleteLocalRef(cls);
         renderer.outputMode = true;
         renderer.init(env, nullptr);
@@ -34,11 +40,41 @@ struct SessionConnection {
         }
         renderer.removeAllBuffers();
         headerBytes = 0;
+        free(clipboard); clipboard = nullptr; clipboardBytes = clipboardSize = 0;
         if (notify) env->CallVoidMethod(owner, closedCallback);
+    }
+
+    bool sendAll(const void* bytes, size_t size) {
+        size_t sent = 0;
+        while (fd >= 0 && sent < size) {
+            ssize_t count = send(fd, (const char*)bytes + sent, size - sent, MSG_NOSIGNAL);
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) { disconnect(true); return false; }
+            sent += count;
+        }
+        return sent == size;
+    }
+
+    int receiveClipboard() {
+        if (clipboardBytes < clipboardSize) {
+            ssize_t count = recv(fd, clipboard + clipboardBytes, clipboardSize - clipboardBytes, MSG_DONTWAIT);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
+            if (count <= 0) { disconnect(true); return 0; }
+            clipboardBytes += count;
+        }
+        if (clipboardBytes != clipboardSize) return 1;
+        jbyteArray text = env->NewByteArray(clipboardSize);
+        if (!text) { disconnect(true); return 0; }
+        env->SetByteArrayRegion(text, 0, clipboardSize, (const jbyte*)clipboard);
+        free(clipboard); clipboard = nullptr; clipboardBytes = clipboardSize = 0;
+        env->CallVoidMethod(owner, clipboardCallback, text);
+        env->DeleteLocalRef(text);
+        return 1;
     }
 
     int receive(int events) {
         if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) { disconnect(true); return 0; }
+        if (clipboard) return receiveClipboard();
         ssize_t count = recv(fd, (char*)&header + headerBytes, sizeof(header) - headerBytes, MSG_DONTWAIT);
         if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
         if (count <= 0) { disconnect(true); return 0; }
@@ -46,6 +82,14 @@ struct SessionConnection {
         if (headerBytes != sizeof(header)) return 1;
         headerBytes = 0;
         switch (header.type) {
+            case EVENT_CLIPBOARD_SEND:
+                clipboardSize = header.clipboardSend.count;
+                if (clipboardSize > 1024 * 1024) { disconnect(true); return 0; }
+                clipboard = (char*)malloc(clipboardSize + 1);
+                if (!clipboard) { disconnect(true); return 0; }
+                return receiveClipboard();
+            case EVENT_CLIPBOARD_REQUEST: env->CallVoidMethod(owner, clipboardRequestCallback); break;
+            case EVENT_OUTPUT_WINDOWS_DONE: env->CallVoidMethod(owner, windowsCallback); break;
             case EVENT_SHARED_SERVER_STATE: {
                 int sharedFd = ancil_recv_fd(fd);
                 if (sharedFd < 0) { disconnect(true); return 0; }
@@ -70,6 +114,17 @@ struct SessionConnection {
                         (jint)header.frame.window, (jint)header.frame.width, (jint)header.frame.height,
                         header.frame.bufferId ? 1 : 0);
                 break;
+            case EVENT_OUTPUT_LAYER: renderer.setOutputFrame(header); break;
+            case EVENT_OUTPUT_WINDOW: {
+                size_t size = strnlen(header.windowInfo.title, sizeof(header.windowInfo.title));
+                jbyteArray title = env->NewByteArray(size);
+                if (!title) { disconnect(true); return 0; }
+                env->SetByteArrayRegion(title, 0, size, (const jbyte*)header.windowInfo.title);
+                env->CallVoidMethod(owner, windowCallback, (jint)header.windowInfo.window,
+                        title, (jboolean)header.windowInfo.removed, (jboolean)header.windowInfo.mapped);
+                env->DeleteLocalRef(title);
+                break;
+            }
             case EVENT_WINDOW_FOCUS_CHANGED:
             case EVENT_SYNC_REPLY: break;
             default: disconnect(true); return 0;
@@ -149,6 +204,26 @@ Java_com_termux_x11_X11Session_nativeText(JNIEnv* env, jclass, jlong ptr, jint o
         if (send(connection->fd, &event, sizeof(event), MSG_NOSIGNAL) != sizeof(event)) { connection->disconnect(true); break; }
     }
     env->ReleaseStringChars(text, chars);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_termux_x11_X11Session_nativeClipboard(JNIEnv* env, jclass, jlong ptr, jint operation, jbyteArray text) {
+    auto* connection = (SessionConnection*)ptr;
+    if (connection->fd < 0) return;
+    lorieEvent event{};
+    if (operation <= 1) event.clipboardEnable = {.t = EVENT_CLIPBOARD_ENABLE, .enable = (uint8_t)operation};
+    else if (operation == 2) event.type = EVENT_CLIPBOARD_ANNOUNCE;
+    else if (operation == 3 && text) {
+        jsize length = env->GetArrayLength(text);
+        if (length > 1024 * 1024) return;
+        event.clipboardSend = {.t = EVENT_CLIPBOARD_SEND, .count = (uint32_t)length};
+        jbyte* data = env->GetByteArrayElements(text, nullptr);
+        if (!data) return;
+        if (connection->sendAll(&event, sizeof(event))) connection->sendAll(data, length);
+        env->ReleaseByteArrayElements(text, data, JNI_ABORT);
+        return;
+    } else return;
+    connection->sendAll(&event, sizeof(event));
 }
 
 extern "C" JNIEXPORT void JNICALL

@@ -296,6 +296,7 @@ add_library(Xlorie SHARED
         "lorie/renderer.cpp"
         "lorie/renderer_outputs.cpp"
         "lorie/window_outputs.c"
+        "lorie/window_model.c"
         "lorie/session.cpp"
         "lorie/buffer.c"
         "lorie/activity.cpp"

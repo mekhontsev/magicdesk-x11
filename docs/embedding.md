@@ -13,7 +13,7 @@ display/window management. Android 14 device coverage is still required.
 - One `X11Session` per server connection. It owns its HandlerThread, socket,
   shared state, renderer, buffer registry and the single Present-queue consumer.
 - Any number of dynamically identified `Output` objects per connection. XID
-  zero selects the complete X screen. Other XIDs select Composite pixmaps;
+  zero selects the complete X screen. Other XIDs select Composite window families;
   these are not cropped screenshots of the root window.
 - `Output.setSurface` attaches or releases an Android surface. Closing an
   output does not close its X client. Closing a connection does not request
@@ -58,12 +58,18 @@ first sends `phase=attach` using Android 14's `setShareIdentityEnabled(true)`.
 Validate `BroadcastReceiver.getSentFromUid()` against the selected Termux UID,
 the pending identity and token *before* using that Binder. Call `retain` with
 the host's lifetime Binder. Only then does Xorg start. Its `phase=ready`
-broadcast supplies the atomically allocated numeric `display`; verify that it
+broadcast is sent from `ddxReady`, after Xorg allocates its display and
+initializes sockets/screens/input. It supplies the numeric `display`; verify that it
 came from the same server before obtaining `getXConnection()` and passing its
 descriptor to `X11Session.connect`. The embedded path does not use the
 standalone app's fixed knock port or repeating readiness broadcasts. Tokens
 must not be placed in logs or persistent user settings. A production launcher
 must also cancel pending launches when its startup owner disappears.
+Use `-noreset` for retained sessions so the last X client leaving does not
+reinitialize the server generation. Embedded client startup belongs to the
+host, not the standalone `TERMUX_X11_XSTARTUP` preference. Embedded launchers
+also supply their selected execution environment; the standalone Termux
+package's preload library must not leak into that environment.
 
 An absent or cancelled admission is rejected before sockets are created. The
 server exits if no owner attaches within 60 seconds. A stop received during
@@ -141,14 +147,40 @@ controlled tests. A product launcher needs its own Xauthority policy. Do not
 expose the X server's TCP listener; local/container socket ownership is separate
 from the Android Binder bootstrap token.
 
-## Remaining Host Integration
+## Window and Clipboard Contract
 
-This module is not an X window manager or an application catalog. Integration
-still needs managed X client discovery, top-level/transient/menu relationships,
-window-manager policy, clipboard/IME adapters, X cursor presentation and
-application/container launch lifecycle. The host owns Android task placement
-and must not conflate an Android display ID, output ID and XID. Only one owner
-should request whole-screen geometry when multiple outputs select XID zero.
+`onWindowsChanged` publishes complete immutable snapshots after reconciliation,
+never intermediate removals from a batch. Discovery follows X properties and
+screen/property callbacks, without polling. A newly discovered application
+must have been mapped at least once. Unmapped known clients remain in the
+catalog until their resource is destroyed or ceases to be an application.
+Desktop, dock, splash, override-redirect and explicitly transient windows are
+excluded from the application catalog. Titles are bounded to 255 UTF-8 bytes.
+
+An individual output composites its main pixmap and the mapped transient
+family, back to front, with premultiplied alpha for depth-32 layers. Group
+transients/unparented popups follow the focused member only when their
+`WM_CLIENT_LEADER` agrees. Explicit transient chains are bounded against
+cycles. Ordinary children remain part of their parent pixmap. The server
+shares Composite/Damage ownership for repeated XIDs; each output's layers
+and frame arrive as one committed presentation. Families are bounded to 256
+layers and clipped to the main viewport.
+
+`Output.focus` preserves active keyboard grabs and existing dialog focus,
+otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`. `closeWindow` sends
+`WM_DELETE_WINDOW`, falling back to X client termination if unsupported.
+Output destruction itself still releases only a presentation. The host
+decides when to close clients and retained/application sessions.
+
+The focused host enables UTF-8 text clipboard exchange explicitly. Transfers
+are bounded to 1 MiB; fragmented stream payloads are assembled before callback
+delivery. The module does not access Android's ClipboardManager directly.
+
+The host owns Android task placement, application discovery, IME and session
+lifecycle. It must not conflate an Android display ID, output ID and XID. Only
+one owner should request whole-screen geometry when multiple outputs select
+XID zero. Custom X cursor presentation, non-text clipboard formats and
+out-of-viewport popup placement remain host integration work.
 
 The current GPU path uses upstream AHardwareBuffer support. Imported raw
 DMA-BUFs can still take upstream's CPU Present-copy fallback. No CPU screenshot

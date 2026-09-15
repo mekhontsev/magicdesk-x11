@@ -39,6 +39,7 @@
 #include "drm_fourcc.h"
 
 #include "lorie.h"
+#include "window_model.h"
 
 #define DRM_FORMAT_MOD_LINEAR 0
 
@@ -301,8 +302,12 @@ Bool drawSquares() {
 }
 
 void ddxReady(void) {
+    // Xorg has allocated DISPLAY and initialized screens, sockets and input before this boundary.
+    lorieEmbeddedServerReady();
     CursorVisible = TRUE;
     pScreenPtr->DisplayCursor(lorieMouse, pScreenPtr, rootCursor);
+    if (getenv("MAGICDESK_X11_SESSION"))
+        return; // The authenticated embedding host owns client startup.
     if (NoListenAll)
         return;
     if (!xstartupArgv) {
@@ -474,13 +479,14 @@ static void lorieConvertCursor(CursorPtr pCurs, uint32_t *data) {
 }
 
 static void lorieSetCursor(DeviceIntPtr pDev, unused ScreenPtr pScr, CursorPtr pCurs, int x0, int y0) {
-    CursorBitsPtr bits = pCurs ? pCurs->bits : NULL;
     if (!lorieCursorFromMouse(pDev))
         return;
 
     if (pCurs && (pCurs->bits->width >= 512 || pCurs->bits->height >= 512))
         // We do not have enough memory allocated for such a big cursor, let's display default "X" cursor
         pCurs = rootCursor;
+
+    CursorBitsPtr bits = pCurs ? pCurs->bits : NULL;
 
     lorie_mutex_lock(&pvfb->state->cursor.lock, &pvfb->state->cursor.lockingPid);
     if (pCurs && bits) {
@@ -528,6 +534,7 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
 
     pvfb->state->waitForNextFrame = false;
 
+    if (lorieConnectionAlive()) lorieWindowModelRefresh();
     if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
         return TRUE;
 
@@ -867,10 +874,10 @@ void InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
     rendererTestCapabilities(&pvfb->root.legacyDrawing, &pvfb->gpuPresentDisabled);
     xorgGlxCreateVendor();
     lorieInitClipboard();
-
     if (-1 == AddScreen(lorieScreenInit, argc, argv)) {
         FatalError("Couldn't add screen\n");
     }
+    lorieWindowModelInit(pScreenPtr);
 }
 
 // This Present implementation mostly copies the one from `present/present_fake.c`
