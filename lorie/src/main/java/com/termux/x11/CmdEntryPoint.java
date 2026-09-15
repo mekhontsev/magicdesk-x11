@@ -251,6 +251,12 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     private static void initEntryPoint() {
         ctx = createContext();
 
+        String embeddedLibrary = System.getenv("MAGICDESK_X11_LIBRARY");
+        if (embeddedLibrary != null) {
+            System.load(embeddedLibrary);
+            return;
+        }
+
         String path = "lib/" + Build.SUPPORTED_ABIS[0] + "/libXlorie.so";
         ClassLoader loader = CmdEntryPoint.class.getClassLoader();
         URL res = loader != null ? loader.getResource(path) : null;
