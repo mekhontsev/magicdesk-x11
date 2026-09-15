@@ -87,11 +87,10 @@ public final class X11Session implements AutoCloseable {
     /** ICCCM WM_DELETE_WINDOW, or client termination when that protocol is unsupported. */
     public void closeWindow(long windowId) {
         if (windowId <= 0 || windowId > 0xffffffffL) throw new IllegalArgumentException("Invalid X11 window ID");
-        call(() -> {
-            if (!connected) throw new IllegalStateException("X11 server disconnected");
-            nativeCommand(nativeHandle, 0, (int)windowId, 8, 0, 0, 0, false);
+        dispatch(() -> {
+            if (connected) nativeCommand(nativeHandle, 0, (int)windowId, 8, 0, 0, 0, false);
             return null;
-        });
+        }, true);
     }
 
     private void onNativeWindow(int id, byte[] title, boolean removed, boolean mapped) {
