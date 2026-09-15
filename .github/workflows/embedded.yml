@@ -27,10 +27,10 @@ jobs:
           msystem: UCRT64
           install: bison patch mingw-w64-ucrt-x86_64-gcc
       - name: Host native tools
-        shell: pwsh
+        shell: msys2 {0}
         run: |
-          'C:\msys64\ucrt64\bin' >> $env:GITHUB_PATH
-          'C:\msys64\usr\bin' >> $env:GITHUB_PATH
+          cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
+          cygpath -w /usr/bin >> "$GITHUB_PATH"
       - uses: gradle/actions/setup-gradle@v6
       - name: Build library and example
         shell: pwsh
