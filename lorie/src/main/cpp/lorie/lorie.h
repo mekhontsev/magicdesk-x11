@@ -1,5 +1,7 @@
 #pragma once
 
+#include <unistd.h>
+
 #include <android/hardware_buffer.h>
 #include <android/native_window_jni.h>
 #include <android/choreographer.h>
