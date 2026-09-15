@@ -41,7 +41,8 @@ generates a fresh unpredictable token for each pending session and launches
 | `MAGICDESK_X11_PACKAGE` | Exact receiver application package |
 | `MAGICDESK_X11_SESSION` | Host-owned session identity |
 | `MAGICDESK_X11_TOKEN` | Pending-session authentication token |
-| `MAGICDESK_X11_AUTHORITY` | Optional host ContentProvider for an owned pre-start handoff |
+| `MAGICDESK_X11_LIBRARY` | Host's extracted `nativeLibraryDir/libXlorie.so` |
+| `MAGICDESK_X11_OWNER_REQUIRED` | Require an authenticated owner before starting Xorg |
 | `TMPDIR` | X socket/runtime directory in the selected Termux/container environment |
 | `XKB_CONFIG_ROOT` | Keyboard configuration files from that environment |
 
@@ -51,23 +52,25 @@ Do not inject the container's `LD_LIBRARY_PATH` into the
 Android runtime; preserve the client's loader environment through upstream
 `XSTARTUP_LD_LIBRARY_PATH` and `XSTARTUP_LD_PRELOAD` when needed.
 
-The readiness broadcast contains `session`, `token` and the command Binder in
-the existing null-key Bundle. Validate the pending identity and token *before*
-using that Binder. Retain the server, obtain `getXConnection()`, and pass its
+Each broadcast contains `session`, `token`, `phase` and the command Binder in
+the existing null-key Bundle. With `MAGICDESK_X11_OWNER_REQUIRED`, the server
+first sends `phase=attach` using Android 14's `setShareIdentityEnabled(true)`.
+Validate `BroadcastReceiver.getSentFromUid()` against the selected Termux UID,
+the pending identity and token *before* using that Binder. Call `retain` with
+the host's lifetime Binder. Only then does Xorg start. Its `phase=ready`
+broadcast supplies the atomically allocated numeric `display`; verify that it
+came from the same server before obtaining `getXConnection()` and passing its
 descriptor to `X11Session.connect`. The embedded path does not use the
 standalone app's fixed knock port or repeating readiness broadcasts. Tokens
 must not be placed in logs or persistent user settings. A production launcher
 must also cancel pending launches when its startup owner disappears.
 
-With `MAGICDESK_X11_AUTHORITY`, the server calls the host provider before
-starting Xorg: `call("attach", token, {session, server})` returns an `owner`
-Binder. The host validates its pending session, token and expected caller UID;
-an absent or cancelled launch is rejected before sockets are created. The
-server retains that Binder before native startup. Once Xorg is ready it calls
-`ready` with the same identity and the allocated numeric `display`. No readiness
-broadcast is used on this path. A stop received during native initialization is
-applied when the server becomes ready. The host owns the startup deadline and
-rejects late callbacks; server termination uses normal Xorg cleanup.
+An absent or cancelled admission is rejected before sockets are created. The
+server exits if no owner attaches within 60 seconds. A stop received during
+native initialization is applied when the server becomes ready. The host also
+owns its startup deadline and rejects late callbacks; server termination uses
+normal Xorg cleanup. The independent example can retain a server at readiness,
+but a product host must use the pre-start ownership handshake.
 
 Callbacks are delivered on the caller-supplied Executor. `onFrame` publishes
 changes to dimensions/availability, not every animation frame. Mouse positions
@@ -80,7 +83,10 @@ unrelated privileged service worker.
 
 Initialize all submodules recursively. Build the independent example with
 JDK 17+, Android SDK 37, NDK 27.3.13750724, CMake, Ninja, Python 3, Bison and
-`patch` installed:
+`patch` installed, plus a host C compiler for source generation. Windows uses
+MSYS2 Bison/patch and a UCRT64 host compiler alongside the Android NDK. Add the
+actual MSYS2 `usr/bin` and `ucrt64/bin` directories to PATH; Android native code
+is still compiled by the NDK, not the host compiler:
 
 ```sh
 ./gradlew -p examples/android :app:assembleDebug :app:lintDebug :embedded:lintDebug

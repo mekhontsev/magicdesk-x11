@@ -28,6 +28,8 @@ public final class X11Session implements AutoCloseable {
     private final Executor callbacks;
     private final Listener listener;
     private final Map<Integer, Output> outputs = new LinkedHashMap<>();
+    private final Object submissions = new Object();
+    private FutureTask<Void> shutdown;
     private volatile boolean closed;
     private boolean connected;
     private int nextOutputId;
@@ -99,7 +101,7 @@ public final class X11Session implements AutoCloseable {
             if (surface != null && (width < 1 || height < 1 || width > 16384 || height > 16384))
                 throw new IllegalArgumentException("Invalid X11 output size");
             if (released || closed) return;
-            call(() -> {
+            dispatch(() -> {
                 if (released) return null;
                 if (surface != null) {
                     this.width = width;
@@ -108,7 +110,7 @@ public final class X11Session implements AutoCloseable {
                 }
                 nativeSurface(nativeHandle, id, surface, false);
                 return null;
-            });
+            }, true);
         }
 
         /** Coordinates are normalized to the displayed X11 content, excluding letterboxing. */
@@ -149,7 +151,7 @@ public final class X11Session implements AutoCloseable {
         /** Releases only this presentation, never the X client or server process. */
         @Override public void close() {
             if (released || closed) return;
-            call(() -> {
+            dispatch(() -> {
                 if (!released) {
                     released = true;
                     send(RELEASE, 0, 0, 0, false);
@@ -157,7 +159,7 @@ public final class X11Session implements AutoCloseable {
                     outputs.remove(id);
                 }
                 return null;
-            });
+            }, true);
         }
     }
 
@@ -179,30 +181,49 @@ public final class X11Session implements AutoCloseable {
     }
 
     @Override public void close() {
-        if (closed) return;
-        dispatch(() -> {
-            if (closed) return null;
-            for (Output output : outputs.values()) output.released = true;
-            outputs.clear();
-            nativeDestroy(nativeHandle);
-            nativeHandle = 0;
-            closed = true;
-            thread.quitSafely();
-            return null;
-        });
+        FutureTask<Void> task;
+        synchronized (submissions) {
+            if (closed) return;
+            if (shutdown == null) {
+                shutdown = new FutureTask<>(() -> {
+                    for (Output output : outputs.values()) output.released = true;
+                    outputs.clear();
+                    nativeDestroy(nativeHandle);
+                    nativeHandle = 0;
+                    closed = true;
+                    thread.quitSafely();
+                    return null;
+                });
+                submit(shutdown);
+            }
+            task = shutdown;
+        }
+        await(task);
     }
 
     private <T> T call(Callable<T> action) {
-        return dispatch(() -> {
-            if (closed) throw new IllegalStateException("X11 session is closed");
-            return action.call();
-        });
+        return dispatch(action, false);
     }
 
-    private <T> T dispatch(Callable<T> action) {
-        FutureTask<T> task = new FutureTask<>(action);
+    private <T> T dispatch(Callable<T> action, boolean optional) {
+        FutureTask<T> task;
+        synchronized (submissions) {
+            if (shutdown != null || closed) {
+                if (optional) return null;
+                throw new IllegalStateException("X11 session is closed");
+            }
+            task = new FutureTask<>(action);
+            submit(task);
+        }
+        return await(task);
+    }
+
+    private void submit(FutureTask<?> task) {
         if (Looper.myLooper() == handler.getLooper()) task.run();
         else if (!handler.post(task)) throw new IllegalStateException("X11 session stopped");
+    }
+
+    private static <T> T await(FutureTask<T> task) {
         boolean interrupted = false;
         try {
             // A submitted native operation owns resources until its acknowledgement, even if the caller is interrupted.

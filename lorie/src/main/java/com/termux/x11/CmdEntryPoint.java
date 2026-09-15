@@ -36,7 +36,7 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public static Context ctx;
     private final Intent intent = createIntent();
     private boolean broadcastPending;
-    private IBinder lifetime;
+    private volatile IBinder lifetime;
     private boolean ready;
     private boolean stopping;
     private String[] ownedArguments;
@@ -54,9 +54,9 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         }
         java.util.Objects.requireNonNull(owner).linkToDeath(ownerDied, 0);
         lifetime = owner;
-        if (ownedArguments != null) handler.post(() -> {
+        handler.post(() -> {
             handler.removeCallbacks(ownershipTimeout);
-            if (stopping) return;
+            if (stopping || ownedArguments == null) return;
             if (!start(ownedArguments)) System.exit(1);
             ownedArguments = null;
         });
