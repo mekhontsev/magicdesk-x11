@@ -209,13 +209,17 @@ public final class X11Session implements AutoCloseable {
         FutureTask<T> task;
         synchronized (submissions) {
             if (shutdown != null || closed) {
-                if (optional) return null;
-                throw new IllegalStateException("X11 session is closed");
+                if (!optional) throw new IllegalStateException("X11 session is closed");
+                task = null;
+            } else {
+                task = new FutureTask<>(action);
+                submit(task);
             }
-            task = new FutureTask<>(action);
-            submit(task);
         }
-        return await(task);
+        if (task != null) return await(task);
+        // Surface teardown must acknowledge any in-flight renderer shutdown too.
+        close();
+        return null;
     }
 
     private void submit(FutureTask<?> task) {
