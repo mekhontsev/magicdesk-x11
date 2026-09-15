@@ -270,7 +270,15 @@ add_library(xserver_glxvnd STATIC ${GLXVND_SOURCES})
 target_include_directories(xserver_glxvnd PRIVATE ${inc})
 target_compile_options(xserver_glxvnd PRIVATE ${c_only_compile_options} ${compile_options})
 
-set(XSERVER_LIBS tirpc Xdmcp Xau pixman Xfont2 fontenc GLESv2 xshmfence xkbcomp)
+set(LORIE_EGL EGL)
+set(LORIE_GLES GLESv2)
+set(LORIE_ZLIB z)
+if (DEFINED LORIE_ANDROID_LIBDIR)
+    set(LORIE_EGL "${LORIE_ANDROID_LIBDIR}/libEGL.so")
+    set(LORIE_GLES "${LORIE_ANDROID_LIBDIR}/libGLESv2.so")
+    set(LORIE_ZLIB "${LORIE_ANDROID_LIBDIR}/libz.so")
+endif()
+set(XSERVER_LIBS tirpc Xdmcp Xau pixman Xfont2 fontenc ${LORIE_GLES} xshmfence xkbcomp)
 foreach (part glx glxvnd fb mi dix composite damageext dbe randr miext_damage render present xext
          dri3 miext_sync xfixes xi xkb record xi_stubs xkb_stubs os exa)
     set(XSERVER_LIBS ${XSERVER_LIBS} xserver_${part})
@@ -286,6 +294,9 @@ add_library(Xlorie SHARED
         "lorie/InitInput.c"
         "lorie/InputXKB.c"
         "lorie/renderer.cpp"
+        "lorie/renderer_outputs.cpp"
+        "lorie/window_outputs.c"
+        "lorie/session.cpp"
         "lorie/buffer.c"
         "lorie/activity.cpp"
         "lorie/cmdentrypoint.cpp"
@@ -295,7 +306,10 @@ target_include_directories(Xlorie PRIVATE ${inc} "libxcvt/include")
 # and cmdentrypoint.cpp are restricted to a runtime-free subset of C++ (no exceptions, no RTTI, no
 # STL) to make that possible.
 target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvisibility=hidden" "-nostdlib++")
-target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android mediandk log m z EGL GLESv2)
+target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android mediandk log m ${LORIE_ZLIB} ${LORIE_EGL} ${LORIE_GLES})
+if (DEFINED LORIE_ANDROID_LIBDIR)
+    target_compile_definitions(Xlorie PRIVATE EGL_NO_PLATFORM_SPECIFIC_TYPES)
+endif()
 target_compile_options(Xlorie PRIVATE ${compile_options} "$<$<COMPILE_LANGUAGE:C>:${c_only_compile_options}>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")
 target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy" "${CMAKE_CURRENT_SOURCE_DIR}/patches/libepoxy.patch")

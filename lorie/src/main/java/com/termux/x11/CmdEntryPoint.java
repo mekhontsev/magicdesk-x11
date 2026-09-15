@@ -35,6 +35,22 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     public static Context ctx;
     private final Intent intent = createIntent();
     private boolean broadcastPending;
+    private IBinder lifetime;
+    private final IBinder.DeathRecipient ownerDied = this::stopServer;
+
+    @Override public synchronized void retain(IBinder owner) throws RemoteException {
+        if (System.getenv("MAGICDESK_X11_SESSION") == null)
+            throw new IllegalStateException("Only an explicitly owned session has a lifetime owner");
+        if (lifetime != null) {
+            if (!lifetime.equals(owner)) throw new IllegalStateException("Session already has a lifetime owner");
+            return;
+        }
+        java.util.Objects.requireNonNull(owner).linkToDeath(ownerDied, 0);
+        lifetime = owner;
+    }
+
+    @Override public void stop() { stopServer(); }
+    private native void stopServer();
 
     /**
      * Command-line entry point.
@@ -55,14 +71,15 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
 
     @SuppressLint({"WrongConstant", "PrivateApi"})
     private Intent createIntent() {
-        // We should not care about multiple instances, it should be called only by `Termux:X11` app
-        // which is single instance...
         Bundle bundle = new Bundle();
         bundle.putBinder(null, this);
 
         Intent intent = new Intent(ACTION_START);
         intent.putExtra(null, bundle);
-        intent.setPackage(BuildConfig.APPLICATION_ID);
+        String host = System.getenv("MAGICDESK_X11_PACKAGE");
+        intent.setPackage(host == null ? BuildConfig.APPLICATION_ID : host);
+        intent.putExtra("session", System.getenv("MAGICDESK_X11_SESSION"));
+        intent.putExtra("token", System.getenv("MAGICDESK_X11_TOKEN"));
 
         if (getuid() == 0 || getuid() == 2000)
             intent.setFlags(0x00400000 /* FLAG_RECEIVER_FROM_SHELL */);
@@ -71,6 +88,10 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     }
 
     private void sendBroadcast() {
+        if (System.getenv("MAGICDESK_X11_SESSION") != null) {
+            handler.post(() -> sendBroadcast(intent));
+            return;
+        }
         // Called from native (the X server thread) on every knock on the port; coalesce
         // bursts into a single broadcast fired 250ms later.
         synchronized (this) {

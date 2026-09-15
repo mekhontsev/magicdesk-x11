@@ -114,6 +114,8 @@ typedef enum {
     EVENT_LOCK_KEYS_STATE,
     EVENT_SYNC,
     EVENT_SYNC_REPLY,
+    EVENT_OUTPUT_COMMAND,
+    EVENT_OUTPUT_FRAME,
 } eventType;
 
 typedef union {
@@ -173,7 +175,28 @@ typedef union {
         uint8_t t;
         uint32_t serial;
     } sync;
+    struct {
+        uint8_t t, operation, down;
+        uint32_t output, window;
+        int32_t x, y;
+        uint16_t detail;
+    } output;
+    struct {
+        uint8_t t;
+        uint32_t output, window, width, height;
+        uint64_t bufferId, revision;
+    } frame;
 } lorieEvent;
+
+enum { LORIE_OUTPUT_BIND, LORIE_OUTPUT_RESIZE, LORIE_OUTPUT_POINTER,
+    LORIE_OUTPUT_KEY, LORIE_OUTPUT_RELEASE, LORIE_OUTPUT_FOCUS, LORIE_OUTPUT_TEXT };
+void lorieOutputCommand(const lorieEvent* event);
+void loriePrepareOutputs(void);
+void loriePublishOutputs(struct lorie_shared_server_state* state);
+void lorieResetOutputs(void);
+struct _Pixmap;
+LorieBuffer* lorieExportPixmap(struct _Pixmap* pixmap);
+void lorieSendOutputFrame(const lorieEvent* event);
 
 typedef struct { int16_t x1, y1, x2, y2; } LorieGpuCopyRect;
 
@@ -258,18 +281,42 @@ struct lorie_shared_server_state {
 #ifdef __cplusplus
 #include <EGL/egl.h>
 #include <GLES2/gl2.h>
+#include <media/NdkImageReader.h>
 #include "list.h"
 
 struct Renderer {
+    struct Output {
+        Output* next = nullptr;
+        uint32_t id = 0;
+        ANativeWindow *window = nullptr, *pending = nullptr;
+        EGLSurface surface = EGL_NO_SURFACE;
+        bool changed = false;
+        bool released = false;
+        lorieEvent frame{};
+        uint64_t drawnRevision = 0;
+    };
+    Output* outputs = nullptr;
+    bool outputMode = false;
+    bool setOutputSurface(JNIEnv* env, uint32_t id, jobject surface, bool release);
+    void setOutputFrame(const lorieEvent& event);
+    bool outputSurfacesChanged() const;
+    bool hasOutputSurface() const;
+    bool outputsNeedDraw() const;
+    void refreshOutputSurfaces();
+    void invalidateOutputs();
+    void drawOutputs();
     EGLDisplay egl_display = EGL_NO_DISPLAY;
     EGLContext ctx = EGL_NO_CONTEXT;
     EGLSurface defaultSfc = EGL_NO_SURFACE, sfc = EGL_NO_SURFACE;
     EGLConfig cfg = nullptr;
     ANativeWindow *defaultWin = nullptr, *win = nullptr;
+    AImageReader* defaultReader = nullptr;
+    jobject defaultTexture = nullptr, defaultSurface = nullptr;
     struct xorg_list addedBuffers{}, buffers{}, removedBuffers{};
     volatile jint filtering = GL_NEAREST;
 
     pthread_t thread = 0;
+    bool initialized = false;
     volatile bool stopping = false;
     volatile bool stateChanged = false, windowChanged = false, viewportChanged = false;
     struct lorie_shared_server_state* pendingState = nullptr;
@@ -327,9 +374,11 @@ struct Renderer {
 
     volatile int* connFdPtr = nullptr;
 
-    void init(JNIEnv* env, jobject thiz);
+    bool init(JNIEnv* env, jobject thiz);
     void destroy();
     void* initThread();
+    ANativeWindow* createDefaultWindow(JNIEnv* env);
+    void releaseGraphics();
     int getWakeupCondFd() const;
     void setFiltering(jint f);
     void testCapabilities(int* legacy_drawing, int* gpu_present_disabled);

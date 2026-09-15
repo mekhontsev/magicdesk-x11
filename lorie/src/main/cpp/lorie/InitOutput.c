@@ -108,7 +108,7 @@ static pthread_cond_t* volatile rendererCond = &rendererCondPlaceholder;
 
 typedef struct {
     LorieBuffer *buffer;
-    bool flipped, wasLocked, imported;
+    bool flipped, wasLocked, imported, outputExported;
     void *locked;
     void *mem;
 } LoriePixmapPriv;
@@ -133,6 +133,21 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
     }
 
     return desc->type == type ? priv->buffer : NULL;
+}
+
+LorieBuffer* lorieExportPixmap(PixmapPtr pixmap) {
+    if (!pixmap) return NULL;
+    LorieBuffer* buffer = lorieEnsureGpuSampleable(pixmap,
+            pvfb->root.legacyDrawing ? LORIEBUFFER_FD : LORIEBUFFER_AHARDWAREBUFFER);
+    if (!buffer) return NULL;
+    LoriePixmapPriv* priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    priv->outputExported = true;
+    if (priv->locked) {
+        LorieBuffer_unlock(buffer);
+        if (LorieBuffer_lock(buffer, &priv->locked)) FatalError("Output buffer lock failed\n");
+    }
+    lorieRegisterBuffer(buffer);
+    return buffer;
 }
 
 static Bool lorieServerDebugEnabled = FALSE;
@@ -504,7 +519,9 @@ static void loriePerformVblanks(void);
 static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     int status, nonEmpty;
     LoriePixmapPriv* priv;
-    PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
+
+    // Geometry changes and Present completion can replace the screen pixmap.
+    loriePrepareOutputs();
 
     pvfb->current_msc++;
     loriePerformVblanks();
@@ -514,6 +531,9 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
         return TRUE;
 
+    loriePublishOutputs(pvfb->state);
+
+    PixmapPtr root = pScreenPtr && pScreenPtr->root ? pScreenPtr->GetWindowPixmap(pScreenPtr->root) : NULL;
     nonEmpty = RegionNotEmpty(DamageRegion(pvfb->damage));
     priv = root ? exaGetPixmapDriverPrivate(root) : NULL;
 
@@ -552,6 +572,20 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
 }
 
 static uint64_t gpuCopyAttempts = 0, gpuCopyOffloads = 0;
+static unsigned gpuCopyDiagnosticReasons;
+
+static void lorieExplainGpuFallback(unsigned reason, const char* name,
+                                    PixmapPtr src, PixmapPtr dst) {
+    if (!lorieServerDebugEnabled || (gpuCopyDiagnosticReasons & reason)) return;
+    gpuCopyDiagnosticReasons |= reason;
+    LorieBuffer* source = LORIE_BUFFER_FROM_PIXMAP(src);
+    LorieBuffer* destination = LORIE_BUFFER_FROM_PIXMAP(dst);
+    log(INFO, "Present fallback=%s srcType=%d dstType=%d disabled=%d legacy=%d renderer=%d connection=%d",
+        name, source ? LorieBuffer_description(source)->type : -1,
+        destination ? LorieBuffer_description(destination)->type : -1,
+        pvfb->gpuPresentDisabled, pvfb->root.legacyDrawing,
+        lorieRendererAvailable(), lorieConnectionAlive());
+}
 
 static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unused void *arg) {
     if (pvfb->state->renderedFrames || gpuCopyAttempts)
@@ -580,6 +614,7 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 }
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
+    lorieResetOutputs();
     pScreenPtr = NULL;
     pScreen->DestroyPixmap(pScreen->devPrivate);
     pScreen->devPrivate = NULL;
@@ -911,18 +946,25 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     uint32_t writeIndex, readIndex;
 
     if (pvfb->gpuPresentDisabled || pvfb->root.legacyDrawing) {
+        lorieExplainGpuFallback(1, "capability", pixmap, dst);
         gpuCopyAttempts++;
         return FALSE;
     }
 
     if (!lorieConnectionAlive() || !lorieRendererAvailable()) {
+        lorieExplainGpuFallback(2, "viewer-unavailable", pixmap, dst);
         // No renderer to drain the queue, so fall back to CPU copy.
         gpuCopyAttempts++;
         return FALSE;
     }
 
-    if (!(srcBuffer = lorieEnsureGpuSampleable(pixmap, LORIEBUFFER_AHARDWAREBUFFER)) ||
-        !(dstBuffer = lorieEnsureGpuSampleable(dst, LORIEBUFFER_AHARDWAREBUFFER))) {
+    if (!(srcBuffer = lorieEnsureGpuSampleable(pixmap, LORIEBUFFER_AHARDWAREBUFFER))) {
+        lorieExplainGpuFallback(4, "source-not-ahb", pixmap, dst);
+        gpuCopyAttempts++;
+        return FALSE;
+    }
+    if (!(dstBuffer = lorieEnsureGpuSampleable(dst, LORIEBUFFER_AHARDWAREBUFFER))) {
+        lorieExplainGpuFallback(8, "destination-not-ahb", pixmap, dst);
         gpuCopyAttempts++;
         return FALSE;
     }
@@ -947,6 +989,7 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     }
 
     if (numRects <= 0 || numRects > LORIE_GPU_COPY_MAX_RECTS) {
+        lorieExplainGpuFallback(16, "rectangles", pixmap, dst);
         gpuCopyAttempts++;
         return FALSE;
     }
@@ -954,6 +997,7 @@ Bool lorieTryScheduleGpuCopy(PixmapPtr pixmap, PixmapPtr dst, RegionPtr update, 
     writeIndex = pvfb->state->gpuCopyQueue.writeIndex;
     readIndex = pvfb->state->gpuCopyQueue.readIndex;
     if (writeIndex - readIndex >= LORIE_GPU_COPY_QUEUE_CAPACITY) {
+        lorieExplainGpuFallback(32, "queue-full", pixmap, dst);
         gpuCopyAttempts++;
         return FALSE;
     }
@@ -1119,6 +1163,7 @@ Bool lorieModifyPixmapHeader(PixmapPtr pPix, __unused int w, __unused int h, __u
 
 // Whether a CPU access to pPix could race a GPU write from the renderer, and so needs state->lock.
 static inline __always_inline Bool lorieNeedsGpuLock(PixmapPtr pPix, LoriePixmapPriv *priv, int index) {
+    if (priv->outputExported) return TRUE;
     if (pScreenPtr->GetScreenPixmap(pScreenPtr) == pPix)
         return index == EXA_PREPARE_DEST || (pvfb->rootGpuCopyPending && !pvfb->root.legacyDrawing);
     return !pvfb->root.legacyDrawing && priv->buffer &&

@@ -98,6 +98,7 @@ static jboolean start(JNIEnv *env, jobject self, jobjectArray args) {
 
     {
         cpu_set_t mask;
+        CPU_ZERO(&mask);
         long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
 
         for (int i = num_cpus/2; i < num_cpus; i++)
@@ -276,6 +277,18 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
     again:
     if (read(fd, &e, sizeof(e)) == sizeof(e)) {
         switch(e.type) {
+            case EVENT_OUTPUT_COMMAND: {
+                auto* copy = (lorieEvent*) malloc(sizeof(e));
+                if (!copy) break;
+                *copy = e;
+                QueueWorkProc(+[](__unused ClientPtr client, void* closure) -> Bool {
+                    lorieOutputCommand((lorieEvent*) closure);
+                    free(closure);
+                    return TRUE;
+                }, nullptr, copy);
+                lorieWakeServer();
+                break;
+            }
             case EVENT_SCREEN_SIZE: {
                 auto *copy = (lorieEvent*) calloc(1, sizeof(lorieEvent) + e.screenSize.name_size + 1);
                 memcpy(copy, &e, sizeof(e));
@@ -500,6 +513,10 @@ void lorieSendSharedServerState(int memfd) {
     }
 }
 
+void lorieSendOutputFrame(const lorieEvent* event) {
+    if (conn_fd != -1) send(conn_fd, event, sizeof(*event), MSG_NOSIGNAL);
+}
+
 void lorieRegisterBuffer(LorieBuffer* buffer) {
     unsigned long id = LorieBuffer_description(buffer)->id;
     if (conn_fd == -1 || LorieBufferList_findById(&registeredBuffers, id))
@@ -540,6 +557,14 @@ static jobject getXConnection(JNIEnv *env, __unused jobject cls) {
     jmethodID adoptFd = env->GetStaticMethodID(ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
     socketpair(AF_UNIX, SOCK_STREAM, 0, client);
     QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
+        if (conn_fd != -1) {
+            InputThreadUnregisterDev(conn_fd);
+            close(conn_fd);
+        }
+        lorieResetOutputs();
+        LorieBuffer* buffer;
+        while ((buffer = LorieBufferList_first(&registeredBuffers)))
+            LorieBuffer_removeFromList(buffer);
         InputThreadRegisterDev((int) (int64_t) closure, handleLorieEvents, nullptr);
         conn_fd = (int) (int64_t) closure;
         lorieActivityConnected();
@@ -573,6 +598,10 @@ static jobject getLogcatOutput(JNIEnv *env, __unused jobject cls) {
 }
 
 void lorieListenForKnocks(void) {
+    if (getenv("MAGICDESK_X11_SESSION")) {
+        serverEnv->CallVoidMethod(thiz, sendBroadcast);
+        return;
+    }
     struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(PORT), .sin_addr = { .s_addr = INADDR_ANY } };
     int fd, reuse = 1;
 
@@ -631,6 +660,13 @@ void lorieListenForKnocks(void) {
 
 void registerCmdEntryPointNatives(JNIEnv *env) {
     static JNINativeMethod methods[] = {
+            {"stopServer", "()V", (void*)+[](JNIEnv*, jobject) {
+                QueueWorkProc(+[](__unused ClientPtr, __unused void*) -> Bool {
+                    GiveUp(0);
+                    return TRUE;
+                }, nullptr, nullptr);
+                lorieWakeServer();
+            }},
             {"start", "([Ljava/lang/String;)Z", (void *) &start},
             {"getXConnection", "()Landroid/os/ParcelFileDescriptor;", (void *) &getXConnection},
             {"getLogcatOutput", "()Landroid/os/ParcelFileDescriptor;", (void *) &getLogcatOutput},

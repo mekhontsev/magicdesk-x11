@@ -6,6 +6,11 @@
 #include <linux/shm.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <unistd.h>
+
+#ifndef SHMLBA
+#define SHMLBA getpagesize()
+#endif
 
 __BEGIN_DECLS
 

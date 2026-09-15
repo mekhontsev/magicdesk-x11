@@ -526,7 +526,8 @@ JNIEXPORT jint JNI_OnLoad(JavaVM *vm, __unused void *reserved) {
     };
     vm->AttachCurrentThread(&env, nullptr);
     jclass cls = env->FindClass("com/termux/x11/LorieView");
-    env->RegisterNatives(cls, methods, sizeof(methods)/sizeof(methods[0]));
+    if (cls) env->RegisterNatives(cls, methods, sizeof(methods)/sizeof(methods[0]));
+    else env->ExceptionClear(); // The embedded module does not include the standalone UI.
 
     registerCmdEntryPointNatives(env);
 

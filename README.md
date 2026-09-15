@@ -1,5 +1,20 @@
 
-# Termux:X11
+# MagicDesk X11
+
+Embeddable X11 runtime for [MagicDesk](https://github.com/mekhontsev/magicdesk),
+maintained as a focused fork of [Termux:X11](https://github.com/termux/termux-x11).
+The `embedded` Android library exposes independently retained server connections
+and multiple output surfaces. An output selects either one X11 window or an
+entire X screen. It does not require the original Termux:X11 APK.
+
+This is the runtime foundation, not yet the complete MagicDesk application
+launcher/window-manager integration. See [Embedding](docs/embedding.md) for
+ownership, current limits and the buildable Android example, and
+[Maintenance](docs/maintenance.md) for upstream updates. GPLv3 and all upstream
+component notices are retained. Original module paths and the standalone app
+remain available for upstream merging.
+
+## Upstream Standalone Application
 
 [![Nightly build](https://github.com/termux/termux-x11/actions/workflows/debug_build.yml/badge.svg?branch=master)](https://github.com/termux/termux-x11/actions/workflows/debug_build.yml) [![Join the chat at https://gitter.im/termux/termux](https://badges.gitter.im/termux/termux.svg)](https://gitter.im/termux/termux) [![Join the Termux discord server](https://img.shields.io/discord/641256914684084234?label=&logo=discord&logoColor=ffffff&color=5865F2)](https://discord.gg/HXpF69X)
 

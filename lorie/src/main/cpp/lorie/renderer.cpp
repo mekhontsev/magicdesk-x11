@@ -170,15 +170,14 @@ static const EGLint ctxattribs[] = {
 };
 
 // The window the context is kept current on while the real surface is gone. Nothing ever reads
-// from the texture behind it, and neither it nor the surface is released, both live as long as
-// the renderer does.
+// from the texture behind it. The renderer owns and releases its reader or Java backing objects.
 //
 // Weird devices without proper EGL_KHR_surfaceless_context support
 // We can not use pbuffer-based surfaces because it will require searching for configs supporting it
 // and I am not sure all devices have configs supporting both pbuffers and regular surfaces simultaneously
-static ANativeWindow* createDefaultWindow(JNIEnv* env) {
+ANativeWindow* Renderer::createDefaultWindow(JNIEnv* env) {
     if (__builtin_available(android 24, *)) {
-        AImageReader* reader = nullptr; // Never released, lives as long as the renderer does, same as the window
+        AImageReader* reader = nullptr;
         ANativeWindow* win = nullptr;
         if (AImageReader_new(1, 1, AIMAGE_FORMAT_RGBA_8888, 2, &reader) != AMEDIA_OK) {
             log("Failed to initialise ImageReader");
@@ -197,8 +196,11 @@ static ANativeWindow* createDefaultWindow(JNIEnv* env) {
             }
         }
 
-        if (win)
+        if (win) {
+            defaultReader = reader;
+            ANativeWindow_acquire(win);
             return win;
+        }
     }
 
     jclass surfaceTextureClass = env->FindClass("android/graphics/SurfaceTexture");
@@ -216,8 +218,8 @@ static ANativeWindow* createDefaultWindow(JNIEnv* env) {
         return nullptr;
     }
 
-    env->NewGlobalRef(surfaceTexture);
-    env->NewGlobalRef(surface);
+    defaultTexture = env->NewGlobalRef(surfaceTexture);
+    defaultSurface = env->NewGlobalRef(surface);
     return ANativeWindow_fromSurface(env, surface);
 }
 
@@ -232,10 +234,6 @@ void* Renderer::initThread() {
     EGLint *const alphaAttrib = &configAttribs[11];
 
     pthread_setname_np(pthread_self(), "LorieRendererThread");
-
-    xorg_list_init(&addedBuffers);
-    xorg_list_init(&buffers);
-    xorg_list_init(&removedBuffers);
 
     egl_display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
     if (egl_display == EGL_NO_DISPLAY)
@@ -260,11 +258,10 @@ void* Renderer::initThread() {
     if (!defaultWin)
         return printEglError("Got no window to keep the context current on", __LINE__);
 
-    ANativeWindow_acquire(defaultWin);
-
     sfc = defaultSfc = eglCreateWindowSurface(egl_display, cfg, win, nullptr);
 
-    eglMakeCurrent(egl_display, sfc, sfc, ctx);
+    if (sfc == EGL_NO_SURFACE || !eglMakeCurrent(egl_display, sfc, sfc, ctx))
+        return printEglError("Unable to make renderer context current", __LINE__);
     eglSwapInterval(egl_display, 0);
 
     g_texture_program = createProgram(vertexShaderSrc, fragmentShaderSrc);
@@ -274,6 +271,7 @@ void* Renderer::initThread() {
     g_texture_program_bgra = createProgram(vertexShaderSrc, fragmentShaderBgraSrc);
     if (!g_texture_program_bgra)
         log("Xlorie: GLESv2: Unable to create bgra shader program.\n");
+    if (!g_texture_program || !g_texture_program_bgra) return nullptr;
 
     gv_pos = (GLuint) glGetAttribLocation(g_texture_program, "position");
     gv_coords = (GLuint) glGetAttribLocation(g_texture_program, "texCoords");
@@ -284,19 +282,27 @@ void* Renderer::initThread() {
     glActiveTexture(GL_TEXTURE0);
     glGenTextures(1, &cursor.id);
 
+    pthread_mutex_lock(&stateLock);
+    initialized = true;
+    pthread_cond_broadcast(&stateChangeFinishCond);
     threadLoop();
     return nullptr;
 }
 
-void Renderer::init(JNIEnv* env, jobject view) {
-    if (ctx)
-        return;
+bool Renderer::init(JNIEnv* env, jobject view) {
+    if (thread)
+        return initialized;
 
     env->GetJavaVM(&jvm);
-    thiz = env->NewGlobalRef(view);
-    jclass clazz = env->FindClass("com/termux/x11/LorieView");
-    lorieViewClass = (jclass) env->NewGlobalRef(clazz);
-    setRendererViewportMethod = env->GetMethodID(lorieViewClass, "setRendererViewport", "(IIIIFFFF)V");
+    if (view) {
+        thiz = env->NewGlobalRef(view);
+        jclass clazz = env->FindClass("com/termux/x11/LorieView");
+        lorieViewClass = (jclass) env->NewGlobalRef(clazz);
+        setRendererViewportMethod = env->GetMethodID(lorieViewClass, "setRendererViewport", "(IIIIFFFF)V");
+    }
+    xorg_list_init(&addedBuffers);
+    xorg_list_init(&buffers);
+    xorg_list_init(&removedBuffers);
 
     pthread_mutex_init(&stateLock, nullptr);
 
@@ -316,23 +322,50 @@ void Renderer::init(JNIEnv* env, jobject view) {
     pthread_spin_init(&bufferLock, false);
 
     stopping = false;
-    pthread_create(&thread, nullptr, +[](void* cookie) -> void* {
-        return ((Renderer*) cookie)->initThread();
+    initialized = false;
+    pthread_mutex_lock(&stateLock);
+    int error = pthread_create(&thread, nullptr, +[](void* cookie) -> void* {
+        auto* renderer = (Renderer*)cookie;
+        renderer->initThread();
+        renderer->releaseGraphics();
+        pthread_mutex_lock(&renderer->stateLock);
+        renderer->stopping = true;
+        pthread_cond_broadcast(&renderer->stateChangeFinishCond);
+        pthread_mutex_unlock(&renderer->stateLock);
+        return nullptr;
     }, this);
+    if (error) { thread = 0; stopping = true; }
+    while (!initialized && !stopping)
+        pthread_cond_wait(&stateChangeFinishCond, &stateLock);
+    pthread_mutex_unlock(&stateLock);
+    pthread_condattr_destroy(&cond_attr);
+    return initialized;
 }
 
 void Renderer::destroy() {
-    if (!ctx)
-        return; // never initialized, or already destroyed
+    if (!stateCond) return;
 
     pthread_mutex_lock(&stateLock);
     stopping = true;
     pthread_cond_signal(stateCond);
     pthread_mutex_unlock(&stateLock);
 
-    pthread_join(thread, nullptr);
+    if (thread) pthread_join(thread, nullptr);
     thread = 0;
-    ctx = EGL_NO_CONTEXT; // re-passes init()'s `if (ctx) return;` guard for a future re-init
+    munmap(stateCond, sizeof(pthread_cond_t));
+    close(stateCondFd);
+    stateCond = nullptr;
+    stateCondFd = -1;
+    pthread_cond_destroy(&stateChangeFinishCond);
+    pthread_mutex_destroy(&stateLock);
+    pthread_spin_destroy(&bufferLock);
+    JNIEnv* env = nullptr;
+    if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK) {
+        if (thiz) env->DeleteGlobalRef(thiz);
+        if (lorieViewClass) env->DeleteGlobalRef(lorieViewClass);
+    }
+    thiz = nullptr;
+    lorieViewClass = nullptr;
 }
 
 int Renderer::getWakeupCondFd() const {
@@ -533,7 +566,7 @@ void Renderer::setSharedState(struct lorie_shared_server_state* newState) {
     stateChanged = true;
     pthread_cond_signal(stateCond);
 
-    while(stateChanged)
+    while(stateChanged && !stopping)
         pthread_cond_wait(&stateChangeFinishCond, &stateLock);
 
     pthread_mutex_unlock(&stateLock);
@@ -605,7 +638,7 @@ void Renderer::setWindow(JNIEnv *env, jobject jsfc) {
     // `freeAllBuffers: 1 buffers were freed while being dequeued!`
     // or
     // `query: BufferQueue has been abandoned`
-    while(windowChanged)
+    while(windowChanged && !stopping)
         pthread_cond_wait(&stateChangeFinishCond, &stateLock);
 
     pthread_mutex_unlock(&stateLock);
@@ -1071,9 +1104,12 @@ bool Renderer::shouldWait(bool *waitingForBuffers) {
     buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
     pthread_spin_unlock(&bufferLock);
     gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
-    if (stateChanged || windowChanged || buffersChanged || gpuCopyPending)
+    if (stateChanged || windowChanged || buffersChanged || gpuCopyPending || outputSurfacesChanged())
         // If there are pending changes we should process them immediately.
         return false;
+
+    if (outputMode)
+        return !state || state->waitForNextFrame || !outputsNeedDraw();
 
     if (state) {
         if (lastRequestedBufferId != state->rootWindowTextureID)
@@ -1107,13 +1143,15 @@ void Renderer::threadLoop() {
             if (state && pendingState != state)
                 oldState = state;
 
+            if (oldState) oldState->surfaceAvailable = false;
+
             state = pendingState;
             pendingState = nullptr;
             stateChanged = false;
             waitingForBuffers = false;
 
             if (state)
-                state->surfaceAvailable = win != defaultWin;
+                state->surfaceAvailable = outputMode ? hasOutputSurface() : win != defaultWin;
             else if (win != defaultWin) {
                 glClearColor(0, 0, 0, 0);
                 glClear(GL_COLOR_BUFFER_BIT);
@@ -1126,6 +1164,8 @@ void Renderer::threadLoop() {
 
         if (windowChanged)
             refreshContext();
+        if (outputMode)
+            refreshOutputSurfaces();
 
         // Attach all pending buffers to GL.
         pthread_spin_lock(&bufferLock);
@@ -1133,6 +1173,7 @@ void Renderer::threadLoop() {
             LorieBuffer_attachToGL(buf);
             LorieBuffer_addToList(buf, &buffers);
             waitingForBuffers = false;
+            invalidateOutputs();
         }
         pthread_spin_unlock(&bufferLock);
 
@@ -1142,7 +1183,9 @@ void Renderer::threadLoop() {
         // Prefer a full redraw over the standalone apply below so a pending GPU copy shares one
         // lock+fence with the root/cursor draw, instead of two GPU round trips per frame.
         bool gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
-        if (state && state->surfaceAvailable && !state->waitForNextFrame &&
+        if (outputMode && state)
+            drawOutputs();
+        else if (state && state->surfaceAvailable && !state->waitForNextFrame &&
             (state->drawRequested || state->cursor.moved || state->cursor.updated || gpuCopyPending))
             redrawLocked(&waitingForBuffers);
         else if (gpuCopyPending)
@@ -1157,6 +1200,10 @@ void Renderer::threadLoop() {
     }
     pthread_mutex_unlock(&stateLock);
 
+}
+
+void Renderer::releaseGraphics() {
+    LorieBuffer* buf;
     // Runs on the renderer thread: safe to touch GL/EGL here, they are thread-affine.
     removeAllBuffers();
     pthread_spin_lock(&bufferLock);
@@ -1179,10 +1226,19 @@ void Renderer::threadLoop() {
     eglDestroyContext(egl_display, ctx);
     // Intentionally not calling eglTerminate(egl_display): the EGLDisplay is a process-wide
     // driver connection, not a per-instance resource.
-    ANativeWindow_release(defaultWin);
-    munmap(stateCond, sizeof(pthread_cond_t));
-    close(stateCondFd);
-    jvm->DetachCurrentThread();
+    if (defaultWin) ANativeWindow_release(defaultWin);
+    if (defaultReader) AImageReader_delete(defaultReader);
+    if (rendererEnv) {
+        if (defaultTexture) rendererEnv->DeleteGlobalRef(defaultTexture);
+        if (defaultSurface) rendererEnv->DeleteGlobalRef(defaultSurface);
+        jvm->DetachCurrentThread();
+    }
+    defaultWin = win = nullptr;
+    defaultReader = nullptr;
+    defaultTexture = defaultSurface = nullptr;
+    rendererEnv = nullptr;
+    sfc = defaultSfc = EGL_NO_SURFACE;
+    ctx = EGL_NO_CONTEXT;
 }
 
 static GLuint loadShader(GLenum shaderType, const char* pSource) {

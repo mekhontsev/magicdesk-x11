@@ -1,0 +1,48 @@
+name: Embedded X11
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Native build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison ninja-build patch
+          sdkmanager "platforms;android-37" "ndk;27.3.13750724" "cmake;3.22.1"
+      - name: Corresponding source
+        run: |
+          git ls-files --recurse-submodules -z | tar --null --verbatim-files-from --files-from=- -czf "$RUNNER_TEMP/MagicDesk-X11-source.tar.gz"
+      - name: Build and lint
+        run: ./gradlew -p examples/android :embedded:assembleRelease :app:assembleDebug :app:lintDebug :embedded:lintDebug
+      - uses: actions/upload-artifact@v7
+        with:
+          name: MagicDesk-X11-${{ github.sha }}
+          path: |
+            embedded/build/outputs/aar/embedded-release.aar
+            examples/android/app/build/outputs/apk/debug/app-debug.apk
+            ${{ runner.temp }}/MagicDesk-X11-source.tar.gz
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: lint-reports
+          path: |
+            embedded/build/reports/lint-results-debug.*
+            examples/android/app/build/reports/lint-results-debug.*
