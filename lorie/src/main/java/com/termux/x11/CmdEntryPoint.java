@@ -17,7 +17,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.os.RemoteException;
-import android.net.Uri;
+import android.app.BroadcastOptions;
 import android.util.Log;
 import android.view.Surface;
 
@@ -39,6 +39,10 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     private IBinder lifetime;
     private boolean ready;
     private boolean stopping;
+    private String[] ownedArguments;
+    private final Runnable ownershipTimeout = () -> {
+        if (lifetime == null) System.exit(1);
+    };
     private final IBinder.DeathRecipient ownerDied = this::stop;
 
     @Override public synchronized void retain(IBinder owner) throws RemoteException {
@@ -50,12 +54,19 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         }
         java.util.Objects.requireNonNull(owner).linkToDeath(ownerDied, 0);
         lifetime = owner;
+        if (ownedArguments != null) handler.post(() -> {
+            handler.removeCallbacks(ownershipTimeout);
+            if (stopping) return;
+            if (!start(ownedArguments)) System.exit(1);
+            ownedArguments = null;
+        });
     }
 
     @Override public void stop() {
         handler.post(() -> {
             stopping = true;
             if (ready) stopServer();
+            else if (ownedArguments != null) System.exit(0);
         });
     }
     private native void stopServer();
@@ -73,30 +84,14 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     }
 
     CmdEntryPoint(String[] args) {
-        if (System.getenv("MAGICDESK_X11_AUTHORITY") != null) {
-            try {
-                Bundle response = hostCall("attach");
-                if (response == null || response.getBinder("owner") == null)
-                    throw new SecurityException("X11 startup is no longer owned");
-                retain(response.getBinder("owner"));
-            } catch (Exception e) {
-                Log.e("CmdEntryPoint", "X11 owner handshake failed", e);
-                System.exit(1);
-                return;
-            }
+        if (System.getenv("MAGICDESK_X11_OWNER_REQUIRED") != null) {
+            ownedArguments = args.clone();
+            handler.postDelayed(ownershipTimeout, 60000);
+            sendBroadcast(new Intent(intent).putExtra("phase", "attach"));
+            return;
         }
         if (!start(args))
             System.exit(1);
-    }
-
-    private Bundle hostCall(String method) {
-        Bundle request = new Bundle();
-        request.putString("session", System.getenv("MAGICDESK_X11_SESSION"));
-        request.putBinder("server", this);
-        if ("ready".equals(method)) request.putString("display", displayName());
-        return ctx.getContentResolver().call(
-                Uri.parse("content://" + System.getenv("MAGICDESK_X11_AUTHORITY")),
-                method, System.getenv("MAGICDESK_X11_TOKEN"), request);
     }
 
     private native String displayName();
@@ -124,13 +119,7 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
             handler.post(() -> {
                 ready = true;
                 if (stopping) { stopServer(); return; }
-                if (System.getenv("MAGICDESK_X11_AUTHORITY") == null) sendBroadcast(intent);
-                else try { hostCall("ready"); }
-                catch (RuntimeException error) {
-                    Log.e("CmdEntryPoint", "X11 readiness was rejected", error);
-                    stopping = true;
-                    stopServer();
-                }
+                sendBroadcast(new Intent(intent).putExtra("phase", "ready").putExtra("display", displayName()));
             });
             return;
         }
@@ -148,8 +137,10 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     }
 
     static void sendBroadcast(Intent intent) {
+        Bundle options = System.getenv("MAGICDESK_X11_OWNER_REQUIRED") == null ? null
+                : BroadcastOptions.makeBasic().setShareIdentityEnabled(true).toBundle();
         try {
-            ctx.sendBroadcast(intent);
+            ctx.sendBroadcast(intent, null, options);
         } catch (Exception e) {
             if (e instanceof NullPointerException && ctx == null)
                 Log.i("Broadcast", "Context is null, falling back to manual broadcasting");
@@ -187,7 +178,7 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
                         .getMethod("send", int.class, Intent.class, String.class, IBinder.class, IIntentReceiver.class, String.class, Bundle.class)
                         .invoke(sender, 0, intent, null, null, new IIntentReceiver.Stub() {
                             @Override public void performReceive(Intent i, int r, String d, Bundle e, boolean o, boolean s, int a) {}
-                        }, null, null);
+                        }, null, options);
             } catch (Exception ex) {
                 throw new RuntimeException(ex);
             }
