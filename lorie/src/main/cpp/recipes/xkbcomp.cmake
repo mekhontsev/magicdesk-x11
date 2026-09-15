@@ -70,12 +70,13 @@ target_include_directories(xkbcomp
         PRIVATE
         "xkbcomp"
         "libx11/include"
-        "libx11/include/X11"
         "libx11/src"
         "libx11/src/xlibi18n"
         "libxkbfile/include/X11/extensions"
         "${CMAKE_CURRENT_BINARY_DIR}")
 target_link_libraries(xkbcomp PRIVATE xorgproto)
+# Quoted private headers must not shadow bionic's <xlocale.h> on Windows.
+target_compile_options(xkbcomp PRIVATE "-iquote${CMAKE_CURRENT_SOURCE_DIR}/libx11/include/X11")
 target_link_options(xkbcomp PRIVATE "-fPIE" "-fPIC")
 target_compile_options(xkbcomp PRIVATE ${common_compile_options} "-fvisibility=hidden" "-DHAVE_STRCASECMP" "-DHAVE_STRDUP" "-DDFLT_XKB_CONFIG_ROOT=\"/\"" "-DHAVE_SYS_IOCTL_H" "-fPIE" "-fPIC" "-DPACKAGE_VERSION=\"2.70\"" "-Wno-shadow")
 target_apply_patch(xkbcomp "${CMAKE_CURRENT_SOURCE_DIR}/xkbcomp" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xkbcomp.patch")
