@@ -11,6 +11,30 @@ permissions:
   contents: read
 
 jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: bison patch mingw-w64-ucrt-x86_64-gcc
+      - name: Host native tools
+        shell: pwsh
+        run: |
+          'C:\msys64\ucrt64\bin' >> $env:GITHUB_PATH
+          'C:\msys64\usr\bin' >> $env:GITHUB_PATH
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Build library and example
+        shell: pwsh
+        run: .\gradlew.bat -p examples/android :embedded:assembleRelease :app:assembleDebug :app:lintDebug :embedded:lintDebug
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 30

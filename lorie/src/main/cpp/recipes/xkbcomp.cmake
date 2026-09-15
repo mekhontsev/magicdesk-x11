@@ -1,11 +1,23 @@
 # Normally xkbcomp is build as executable, but in our case it is better to embed it.
 
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/X11")
+find_program(LORIE_HOST_CC NAMES cc gcc clang REQUIRED NO_CMAKE_FIND_ROOT_PATH)
+set(makekeys "${CMAKE_CURRENT_BINARY_DIR}/makekeys")
+if(CMAKE_HOST_WIN32)
+    string(APPEND makekeys ".exe")
+endif()
+add_custom_command(OUTPUT "${makekeys}"
+        COMMAND "${LORIE_HOST_CC}" -o "${makekeys}" "${CMAKE_CURRENT_SOURCE_DIR}/libx11/src/util/makekeys.c"
+        DEPENDS "libx11/src/util/makekeys.c"
+        VERBATIM)
 
 add_custom_command(
         OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/ks_tables.h"
-        COMMAND "/usr/bin/gcc" "-o" "${CMAKE_CURRENT_BINARY_DIR}/makekeys" "${CMAKE_CURRENT_SOURCE_DIR}/libx11/src/util/makekeys.c" "&&"
-            "${CMAKE_CURRENT_BINARY_DIR}/makekeys" "keysymdef.h" "XF86keysym.h" "Sunkeysym.h" "DECkeysym.h" "HPkeysym.h" ">" "${CMAKE_CURRENT_BINARY_DIR}/ks_tables.h"
+        COMMAND "${CMAKE_COMMAND}" "-DMAKEKEYS=${makekeys}" "-DOUTPUT=${CMAKE_CURRENT_BINARY_DIR}/ks_tables.h"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/recipes/makekeys.cmake"
+        DEPENDS "${makekeys}" "recipes/makekeys.cmake"
+            "xorgproto/include/X11/keysymdef.h" "xorgproto/include/X11/XF86keysym.h"
+            "xorgproto/include/X11/Sunkeysym.h" "xorgproto/include/X11/DECkeysym.h" "xorgproto/include/X11/HPkeysym.h"
         WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/xorgproto/include/X11"
         COMMENT "Generating source code (ks_tables.h)"
         VERBATIM)
