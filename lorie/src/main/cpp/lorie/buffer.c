@@ -53,6 +53,12 @@ void LorieBuffer_gpuCopyPendingInc(LorieBuffer* buffer) {
         buffer->gpuCopyPending++;
 }
 
+int LorieBuffer_fileDescriptor(LorieBuffer* buffer, off_t* offset) {
+    if (!buffer || buffer->desc.type != LORIEBUFFER_FD) return -1;
+    *offset = buffer->offset;
+    return buffer->fd;
+}
+
 void LorieBuffer_gpuCopyPendingDec(LorieBuffer* buffer) {
     if (buffer)
         buffer->gpuCopyPending--;

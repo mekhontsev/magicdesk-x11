@@ -299,6 +299,7 @@ add_library(Xlorie SHARED
         "lorie/window_model.c"
         "lorie/session.cpp"
         "lorie/buffer.c"
+        "lorie/dma_copy.c"
         "lorie/activity.cpp"
         "lorie/cmdentrypoint.cpp"
         "lorie/workqueue.cpp")
@@ -310,6 +311,7 @@ target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvis
 target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android mediandk log m ${LORIE_ZLIB} ${LORIE_EGL} ${LORIE_GLES})
 if (DEFINED LORIE_ANDROID_LIBDIR)
     target_compile_definitions(Xlorie PRIVATE EGL_NO_PLATFORM_SPECIFIC_TYPES)
+    set_source_files_properties("lorie/dma_copy.c" PROPERTIES COMPILE_OPTIONS "--target=aarch64-linux-android34")
 endif()
 target_compile_options(Xlorie PRIVATE ${compile_options} "$<$<COMPILE_LANGUAGE:C>:${c_only_compile_options}>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")

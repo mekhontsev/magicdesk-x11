@@ -133,6 +133,9 @@ bool LorieBuffer_hasGpuCopyPending(LorieBuffer* _Nullable buffer);
  */
 const LorieBuffer_Desc* _Nonnull LorieBuffer_description(LorieBuffer* _Nullable buffer);
 
+// Borrowed linear storage; the caller must retain the LorieBuffer while importing it.
+int LorieBuffer_fileDescriptor(LorieBuffer* _Nullable buffer, off_t* _Nonnull offset);
+
 /**
  * Lock the AHardwareBuffer for direct CPU access.
  * See AHardwareBuffer_lock() description for details

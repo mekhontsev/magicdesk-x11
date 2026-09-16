@@ -101,7 +101,9 @@ is still compiled by the NDK, not the host compiler:
 The SDK is selected through `ANDROID_HOME` or
 `examples/android/local.properties`. In arm64 Termux the module uses the native
 Clang/CMake toolchain and system Android EGL/GLES libraries, without a Linux
-container. Pass `-Pandroid.aapt2FromMavenOverride="$PREFIX/bin/aapt2"` when needed.
+container. Install `vulkan-headers` for compilation; other build hosts use the
+NDK headers. Vulkan itself is loaded dynamically from Android, not bundled or
+required at startup. Pass `-Pandroid.aapt2FromMavenOverride="$PREFIX/bin/aapt2"` when needed.
 The NDK path also builds x86_64; Termux builds only its native arm64 ABI.
 Generated artifacts and local configuration are ignored by Git.
 
@@ -182,6 +184,45 @@ one owner should request whole-screen geometry when multiple outputs select
 XID zero. Custom X cursor presentation, non-text clipboard formats and
 out-of-viewport popup placement remain host integration work.
 
-The current GPU path uses upstream AHardwareBuffer support. Imported raw
-DMA-BUFs can still take upstream's CPU Present-copy fallback. No CPU screenshot
-loop, Mesa replacement or firmware-specific GPU extension is added here.
+## Optional DMA Copy
+
+AHardwareBuffer sources retain upstream's deferred EGL Present queue. Linear
+DRI3 DMA-BUF sources instead use an optional synchronous EXA copy accelerator:
+the system Vulkan driver imports the source allocation and destination AHB.
+The existing renderer lock and GPU completion fence protect pixmap reuse and
+presentation. Imports belong to pixmap lifetimes, not individual frames.
+
+`dma_copy.c` owns Vulkan loading, capability checks, imports and transfer
+commands. It has no link-time Vulkan dependency. Unsupported drivers/buffers
+return to the normal EXA CPU implementation. An ordinary shared-memory FD is
+not a DMA-BUF and is rejected before entering Vulkan. Failed device operations
+quiesce the queue and disable subsequent Vulkan copies in that context. If
+completion cannot be established, the isolated X server terminates rather than
+racing the GPU with a CPU fallback or reusing a client buffer still in flight.
+
+Some drivers require trailing buffer allocation space absent from the DRI3
+image. The accelerator imports the fitting whole rows and stages the remaining
+suffix; it never binds an undersized allocation. This may retain a small CPU
+upload and does not promise universal zero-copy. No CPU screenshot loop, Mesa
+replacement, private gralloc handle or firmware-specific extension is used.
+`MAGICDESK_X11_DISABLE_VULKAN_COPY=1` in the server environment disables this
+accelerator for comparisons; default selection is automatic.
+
+The native fixture compares full/partial copies and source offsets pixel for
+pixel, preserves unaffected destination pixels, checks rejection of ordinary
+shared memory and simulates an unavailable Vulkan loader. In Termux:
+
+```sh
+clang --target=aarch64-linux-android34 examples/dma-copy-producer.c \
+  -o build/dma-copy-producer -lvulkan
+clang --target=aarch64-linux-android34 -fno-termux-rpath \
+  -Ilorie/src/main/cpp/lorie -Wl,-rpath,/system/lib64 -Wl,--wrap=dlopen \
+  examples/dma-copy-test.c lorie/src/main/cpp/lorie/dma_copy.c \
+  -o build/dma-copy-test /system/lib64/libandroid.so -llog -ldl
+build/dma-copy-test build/dma-copy-producer
+```
+
+The producer intentionally uses Termux's Vulkan loader/Mesa; the copy backend
+uses Android's system loader. Run this positive import test only on a device
+with the required external-memory extensions. Unsupported production devices
+must still render through the CPU fallback.

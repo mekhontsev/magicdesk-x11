@@ -40,6 +40,7 @@
 
 #include "lorie.h"
 #include "window_model.h"
+#include "dma_copy.h"
 
 #define DRM_FORMAT_MOD_LINEAR 0
 
@@ -64,6 +65,8 @@ static ExaDriverRec lorieExa;
 typedef struct {
     DamagePtr damage;
     OsTimerPtr fpsTimer;
+    DmaCopyContext* dmaCopy;
+    bool dmaCopyAttempted;
 
     SetWindowPixmapProcPtr SetWindowPixmap;
     CloseScreenProcPtr CloseScreen;
@@ -112,6 +115,9 @@ typedef struct {
     bool flipped, wasLocked, imported, outputExported;
     void *locked;
     void *mem;
+    DmaCopySource* dmaSource;
+    DmaCopyDestination* dmaDestination;
+    bool dmaSourceAttempted, dmaDestinationAttempted;
 } LoriePixmapPriv;
 
 #define LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap) (pixmap ? ((LoriePixmapPriv*) exaGetPixmapDriverPrivate(pixmap)) : NULL)
@@ -579,6 +585,7 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
 }
 
 static uint64_t gpuCopyAttempts = 0, gpuCopyOffloads = 0;
+static uint64_t dmaCopies = 0;
 static unsigned gpuCopyDiagnosticReasons;
 
 static void lorieExplainGpuFallback(unsigned reason, const char* name,
@@ -596,12 +603,18 @@ static void lorieExplainGpuFallback(unsigned reason, const char* name,
 
 static CARD32 lorieFramecounter(unused OsTimerPtr timer, unused CARD32 time, unused void *arg) {
     if (pvfb->state->renderedFrames || gpuCopyAttempts)
-        log(INFO, gpuCopyAttempts ? "%d frames in 5.0 seconds = %.1f FPS, %llu/%llu present copies offloaded to GPU"
+        log(INFO, gpuCopyAttempts ? "%d frames in 5.0 seconds = %.1f FPS, AHB queue %llu/%llu Present attempts"
                                    : "%d frames in 5.0 seconds = %.1f FPS",
             pvfb->state->renderedFrames, ((float) pvfb->state->renderedFrames) / 5,
             (unsigned long long) gpuCopyOffloads, (unsigned long long) gpuCopyAttempts);
     pvfb->state->renderedFrames = 0;
     gpuCopyAttempts = gpuCopyOffloads = 0;
+    if (dmaCopies) {
+        log(INFO, "DMA Present: %llu Vulkan blits, %llu staged bytes in 5 seconds",
+            (unsigned long long)dmaCopies,
+            (unsigned long long)dmaCopyTakeStagedBytes(pvfb->dmaCopy));
+        dmaCopies = 0;
+    }
     return 5000;
 }
 
@@ -626,7 +639,11 @@ static Bool lorieCloseScreen(ScreenPtr pScreen) {
     pScreen->DestroyPixmap(pScreen->devPrivate);
     pScreen->devPrivate = NULL;
     pScreen->CloseScreen = pvfb->CloseScreen;
-    return pScreen->CloseScreen(pScreen);
+    Bool result = pScreen->CloseScreen(pScreen);
+    dmaCopyRelease(pvfb->dmaCopy);
+    pvfb->dmaCopy = NULL;
+    pvfb->dmaCopyAttempted = false;
+    return result;
 }
 
 void lorieSetWindowPixmap(WindowPtr pWindow, PixmapPtr newPixmap) {
@@ -1152,6 +1169,8 @@ void *lorieCreatePixmap(__unused ScreenPtr pScreen, int width, int height, __unu
 
 void lorieExaDestroyPixmap(__unused ScreenPtr pScreen, void *driverPriv) {
     LoriePixmapPriv *priv = driverPriv;
+    dmaCopyReleaseSource(priv->dmaSource);
+    dmaCopyReleaseDestination(priv->dmaDestination);
     if (priv->buffer) {
         if (priv->locked)
             LorieBuffer_unlock(priv->buffer);
@@ -1209,10 +1228,81 @@ void lorieFinishAccess(PixmapPtr pPix, int index) {
     }
 }
 
+static LoriePixmapPriv *dmaSourcePixmap, *dmaDestinationPixmap;
+static bool dmaDestinationWasLocked;
+
+static Bool loriePrepareDmaCopy(PixmapPtr source, PixmapPtr destination,
+        unused int xdir, unused int ydir, int alu, Pixel planemask) {
+    if (alu != GXcopy || source == destination || source->drawable.bitsPerPixel != 32
+            || destination->drawable.bitsPerPixel != 32
+            || !EXA_PM_IS_SOLID(&destination->drawable, planemask)) return FALSE;
+    LoriePixmapPriv* src = LORIE_PIXMAP_PRIV_FROM_PIXMAP(source);
+    LoriePixmapPriv* dst = LORIE_PIXMAP_PRIV_FROM_PIXMAP(destination);
+    if (!src || !dst || !src->buffer || !dst->buffer || src->mem || dst->mem) return FALSE;
+    const LorieBuffer_Desc* sourceDesc = LorieBuffer_description(src->buffer);
+    const LorieBuffer_Desc* destinationDesc = LorieBuffer_description(dst->buffer);
+    if (!src->imported || sourceDesc->type != LORIEBUFFER_FD
+            || destinationDesc->type != LORIEBUFFER_AHARDWAREBUFFER) return FALSE;
+    if (!pvfb->dmaCopyAttempted) {
+        pvfb->dmaCopyAttempted = true;
+        const char* disabled = getenv("MAGICDESK_X11_DISABLE_VULKAN_COPY");
+        if (!disabled || strcmp(disabled, "1")) pvfb->dmaCopy = dmaCopyCreate();
+        log(INFO, "Optional Vulkan DMA copy: %s", pvfb->dmaCopy ? "available" : "unavailable; CPU fallback");
+    }
+    if (!dmaCopyReady(pvfb->dmaCopy)) return FALSE;
+    if (!src->dmaSourceAttempted) {
+        src->dmaSourceAttempted = true;
+        off_t offset = 0;
+        int fd = LorieBuffer_fileDescriptor(src->buffer, &offset);
+        src->dmaSource = dmaCopyImportSource(pvfb->dmaCopy, fd, offset,
+            sourceDesc->width, sourceDesc->height, sourceDesc->stride * 4, sourceDesc->data);
+    }
+    if (!src->dmaSource) return FALSE;
+    if (!dst->dmaDestinationAttempted) {
+        dst->dmaDestinationAttempted = true;
+        dst->dmaDestination = dmaCopyImportDestination(pvfb->dmaCopy, destinationDesc->buffer);
+    }
+    if (!dst->dmaDestination) return FALSE;
+    // The renderer fences its reads before releasing this shared lock. Release CPU ownership
+    // while Vulkan writes the AHB, then restore the pixmap's existing mapping in DoneCopy.
+    lorie_mutex_lock(&pvfb->state->lock, &pvfb->state->lockingPid);
+    dmaDestinationWasLocked = dst->locked != NULL;
+    if (dst->locked) { LorieBuffer_unlock(dst->buffer); dst->locked = NULL; }
+    dmaSourcePixmap = src;
+    dmaDestinationPixmap = dst;
+    return TRUE;
+}
+
+static void lorieDmaCopy(unused PixmapPtr destination, int sx, int sy, int dx, int dy, int width, int height) {
+    DmaCopyResult result = dmaCopyRect(dmaSourcePixmap->dmaSource, dmaDestinationPixmap->dmaDestination,
+        sx, sy, dx, dy, width, height);
+    if (result == DMA_COPY_UNCONFIRMED)
+        FatalError("Cannot confirm completion of DMA-copy GPU work; terminating X server\n");
+    if (result == DMA_COPY_COMPLETE) {
+        dmaCopies++;
+        return;
+    }
+    // Copy returned only after GPU work quiesced; preserve EXA semantics on a device failure.
+    const LorieBuffer_Desc* src = LorieBuffer_description(dmaSourcePixmap->buffer);
+    const LorieBuffer_Desc* dst = LorieBuffer_description(dmaDestinationPixmap->buffer);
+    void* pixels = NULL;
+    if (LorieBuffer_lock(dmaDestinationPixmap->buffer, &pixels)) FatalError("Cannot map DMA-copy fallback destination\n");
+    pixman_blt(src->data, pixels, src->stride, dst->stride, 32, 32, sx, sy, dx, dy, width, height);
+    LorieBuffer_unlock(dmaDestinationPixmap->buffer);
+}
+
+static void lorieDoneDmaCopy(unused PixmapPtr destination) {
+    if (dmaDestinationWasLocked && LorieBuffer_lock(dmaDestinationPixmap->buffer, &dmaDestinationPixmap->locked))
+        FatalError("Cannot restore DMA-copy destination mapping\n");
+    dmaSourcePixmap = dmaDestinationPixmap = NULL;
+    lorie_mutex_unlock(&pvfb->state->lock, &pvfb->state->lockingPid);
+}
+
 static ExaDriverRec lorieExa = {
         .exa_major = EXA_VERSION_MAJOR, .exa_minor = EXA_VERSION_MINOR, .maxX = 32767, .maxY = 32767,
         .flags = EXA_OFFSCREEN_PIXMAPS | EXA_HANDLES_PIXMAPS, .pixmapPitchAlign = 32,
-        .PrepareSolid = FalseNoop, .PrepareCopy = FalseNoop, .PrepareComposite = FalseNoop,
+        .PrepareSolid = FalseNoop, .PrepareCopy = loriePrepareDmaCopy, .PrepareComposite = FalseNoop,
+        .Copy = lorieDmaCopy, .DoneCopy = lorieDoneDmaCopy,
         .PixmapIsOffscreen = TrueNoop, .WaitMarker = VoidNoop,
         .PrepareAccess = loriePrepareAccess, .FinishAccess = lorieFinishAccess,
         .CreatePixmap2 = lorieCreatePixmap, .DestroyPixmap = lorieExaDestroyPixmap,
