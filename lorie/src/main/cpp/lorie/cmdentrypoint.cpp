@@ -31,6 +31,7 @@ extern "C" {
 #include <arpa/inet.h>
 #include <poll.h>
 #include "lorie.h"
+#include "window_icon.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
@@ -546,6 +547,11 @@ void lorieSendSharedServerState(int memfd) {
 
 void lorieSendOutputFrame(const lorieEvent* event) {
     sendData(event, sizeof(*event));
+}
+
+void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon) {
+    if (sendData(event, sizeof(*event)) && event->windowInfo.hasIcon)
+        sendData(icon, LORIE_WINDOW_ICON_PIXELS * sizeof(*icon));
 }
 
 void lorieRegisterBuffer(LorieBuffer* buffer) {

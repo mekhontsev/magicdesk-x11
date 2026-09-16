@@ -29,7 +29,7 @@ typedef struct OutputSelection {
     struct OutputSelection* next;
     uint32_t id;
     XID window;
-    Bool changed, seen, dead, resizePending;
+    Bool changed, seen, dead, resizePending, geometryPending, ownsSize;
     int width, height;
     unsigned layerCount;
     lorieEvent layers[MAX_FAMILY_LAYERS];
@@ -38,6 +38,11 @@ typedef struct OutputSelection {
 
 static OutputSelection* selections;
 static WindowImage* images;
+
+void lorieOutputGeometryChanged(void) {
+    for (OutputSelection* output = selections; output; output = output->next)
+        if (output->window) output->geometryPending = TRUE;
+}
 
 void lorieOutputWindowDestroyed(XID id) {
     // Output ownership ends with the resource, even when its XID is immediately reused.
@@ -55,6 +60,13 @@ static void damageDestroyed(__unused DamagePtr damage, void* closure) {
 }
 
 static void releaseSelection(OutputSelection* output) {
+    if (output->ownsSize) for (OutputSelection* other = selections; other; other = other->next) {
+        if (other != output && !other->dead && other->window == output->window && other->width > 0) {
+            other->ownsSize = TRUE;
+            other->geometryPending = TRUE;
+            break;
+        }
+    }
     free(output);
 }
 
@@ -107,6 +119,7 @@ void lorieOutputCommand(const lorieEvent* event) {
         output->id = event->output.output;
         output->window = event->output.window;
         output->changed = TRUE;
+        output->geometryPending = TRUE;
         output->next = *link;
         *link = output;
         return;
@@ -117,6 +130,10 @@ void lorieOutputCommand(const lorieEvent* event) {
                 event->output.x > 16384 || event->output.y > 16384) return;
         output->width = event->output.x;
         output->height = event->output.y;
+        // Multiple views of one XID may differ in size. Only the latest resize
+        // owns client geometry; passive views preserve aspect ratio.
+        if (output->window) for (OutputSelection* other = selections; other; other = other->next)
+            if (other->window == output->window) other->ownsSize = other == output;
         output->resizePending = TRUE;
         return;
     }
@@ -151,21 +168,40 @@ void lorieOutputCommand(const lorieEvent* event) {
 void loriePrepareOutputs(void) {
     if (!pScreenPtr || !pScreenPtr->root) return;
     for (OutputSelection* output = selections; output; output = output->next) {
-        if (!output->resizePending || output->dead) continue;
+        if ((!output->resizePending && !output->geometryPending) || output->dead) continue;
         WindowPtr window = pScreenPtr->root;
         if (output->window && dixLookupWindow(&window, output->window,
                 serverClient, DixWriteAccess) != Success) continue;
         if (!output->window) {
-            lorieConfigureNotify(output->width, output->height, 60, 0, NULL);
+            if (output->resizePending) lorieConfigureNotify(output->width, output->height, 60, 0, NULL);
         } else {
-            int width = max(pScreenPtr->width, window->drawable.x + output->width);
-            int height = max(pScreenPtr->height, window->drawable.y + output->height);
-            if (width != pScreenPtr->width || height != pScreenPtr->height)
-                lorieConfigureNotify(width, height, 60, 0, NULL);
-            XID size[] = {(XID)output->width, (XID)output->height};
-            ConfigureWindow(window, CWWidth | CWHeight, size, serverClient);
+            // An individual output is hosted by an Android window. Retain its last
+            // Surface size when the client subsequently requests its saved geometry.
+            int width = output->ownsSize ? output->width : window->drawable.width;
+            int height = output->ownsSize ? output->height : window->drawable.height;
+            int x = max(0, window->drawable.x), y = max(0, window->drawable.y);
+            // Composite can expose off-screen pixels, but X input is clipped to the root.
+            // Move the containing top-level (including any WM frame), not its child content.
+            WindowPtr top = window;
+            while (top->parent && top->parent != pScreenPtr->root) top = top->parent;
+            if (x != window->drawable.x || y != window->drawable.y) {
+                XID position[] = {
+                    (XID)(top->origin.x - top->borderWidth + x - window->drawable.x),
+                    (XID)(top->origin.y - top->borderWidth + y - window->drawable.y)
+                };
+                ConfigureWindow(top, CWX | CWY, position, serverClient);
+            }
+            int screenWidth = max(pScreenPtr->width, x + width);
+            int screenHeight = max(pScreenPtr->height, y + height);
+            if (screenWidth != pScreenPtr->width || screenHeight != pScreenPtr->height)
+                lorieConfigureNotify(screenWidth, screenHeight, 60, 0, NULL);
+            if (width != window->drawable.width || height != window->drawable.height) {
+                XID size[] = {(XID)width, (XID)height};
+                ConfigureWindow(window, CWWidth | CWHeight, size, serverClient);
+            }
         }
         output->resizePending = FALSE;
+        output->geometryPending = FALSE;
     }
 }
 

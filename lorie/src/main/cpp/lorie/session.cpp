@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <android/looper.h>
 #include "lorie.h"
+#include "window_icon.h"
 
 struct SessionConnection {
     Renderer renderer;
@@ -13,6 +14,9 @@ struct SessionConnection {
     size_t headerBytes = 0;
     char* clipboard = nullptr;
     size_t clipboardBytes = 0, clipboardSize = 0;
+    uint32_t windowIcon[LORIE_WINDOW_ICON_PIXELS]{};
+    size_t windowIconBytes = 0;
+    bool windowPending = false;
     JNIEnv* env;
     jobject owner;
     jmethodID frameCallback, closedCallback, windowCallback, windowsCallback, clipboardCallback, clipboardRequestCallback;
@@ -21,7 +25,7 @@ struct SessionConnection {
         jclass cls = env->GetObjectClass(owner);
         frameCallback = env->GetMethodID(cls, "onNativeFrame", "(IIIII)V");
         closedCallback = env->GetMethodID(cls, "onNativeDisconnected", "()V");
-        windowCallback = env->GetMethodID(cls, "onNativeWindow", "(I[BZZ)V");
+        windowCallback = env->GetMethodID(cls, "onNativeWindow", "(I[B[IZZ)V");
         windowsCallback = env->GetMethodID(cls, "onNativeWindowsCommitted", "()V");
         clipboardCallback = env->GetMethodID(cls, "onNativeClipboard", "([B)V");
         clipboardRequestCallback = env->GetMethodID(cls, "onNativeClipboardRequest", "()V");
@@ -41,6 +45,7 @@ struct SessionConnection {
         renderer.removeAllBuffers();
         headerBytes = 0;
         free(clipboard); clipboard = nullptr; clipboardBytes = clipboardSize = 0;
+        windowPending = false; windowIconBytes = 0;
         if (notify) env->CallVoidMethod(owner, closedCallback);
     }
 
@@ -72,9 +77,35 @@ struct SessionConnection {
         return 1;
     }
 
+    int receiveWindow() {
+        jintArray icon = nullptr;
+        if (header.windowInfo.hasIcon) {
+            ssize_t count = recv(fd, (char*)windowIcon + windowIconBytes,
+                    sizeof(windowIcon) - windowIconBytes, MSG_DONTWAIT);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
+            if (count <= 0) { disconnect(true); return 0; }
+            windowIconBytes += count;
+            if (windowIconBytes != sizeof(windowIcon)) return 1;
+            icon = env->NewIntArray(LORIE_WINDOW_ICON_PIXELS);
+            if (!icon) { disconnect(true); return 0; }
+            env->SetIntArrayRegion(icon, 0, LORIE_WINDOW_ICON_PIXELS, (const jint*)windowIcon);
+        }
+        size_t size = strnlen(header.windowInfo.title, sizeof(header.windowInfo.title));
+        jbyteArray title = env->NewByteArray(size);
+        if (!title) { if (icon) env->DeleteLocalRef(icon); disconnect(true); return 0; }
+        env->SetByteArrayRegion(title, 0, size, (const jbyte*)header.windowInfo.title);
+        env->CallVoidMethod(owner, windowCallback, (jint)header.windowInfo.window,
+                title, icon, (jboolean)header.windowInfo.removed, (jboolean)header.windowInfo.mapped);
+        env->DeleteLocalRef(title);
+        if (icon) env->DeleteLocalRef(icon);
+        windowPending = false; windowIconBytes = 0;
+        return 1;
+    }
+
     int receive(int events) {
         if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) { disconnect(true); return 0; }
         if (clipboard) return receiveClipboard();
+        if (windowPending) return receiveWindow();
         ssize_t count = recv(fd, (char*)&header + headerBytes, sizeof(header) - headerBytes, MSG_DONTWAIT);
         if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
         if (count <= 0) { disconnect(true); return 0; }
@@ -116,14 +147,8 @@ struct SessionConnection {
                 break;
             case EVENT_OUTPUT_LAYER: renderer.setOutputFrame(header); break;
             case EVENT_OUTPUT_WINDOW: {
-                size_t size = strnlen(header.windowInfo.title, sizeof(header.windowInfo.title));
-                jbyteArray title = env->NewByteArray(size);
-                if (!title) { disconnect(true); return 0; }
-                env->SetByteArrayRegion(title, 0, size, (const jbyte*)header.windowInfo.title);
-                env->CallVoidMethod(owner, windowCallback, (jint)header.windowInfo.window,
-                        title, (jboolean)header.windowInfo.removed, (jboolean)header.windowInfo.mapped);
-                env->DeleteLocalRef(title);
-                break;
+                windowPending = true;
+                return receiveWindow();
             }
             case EVENT_WINDOW_FOCUS_CHANGED:
             case EVENT_SYNC_REPLY: break;

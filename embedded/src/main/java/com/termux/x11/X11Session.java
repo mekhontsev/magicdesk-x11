@@ -1,5 +1,6 @@
 package com.termux.x11;
 
+import android.graphics.Bitmap;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -24,7 +25,7 @@ public final class X11Session implements AutoCloseable {
         default void onClipboard(String text) { }
     }
 
-    public record Window(long id, String title, boolean mapped) { }
+    public record Window(long id, String title, boolean mapped, Bitmap icon) { }
 
     private static final int BIND = 0, RESIZE = 1, POINTER = 2, KEY = 3, RELEASE = 4, FOCUS = 5;
     private final HandlerThread thread = new HandlerThread("X11Session");
@@ -93,9 +94,18 @@ public final class X11Session implements AutoCloseable {
         }, true);
     }
 
-    private void onNativeWindow(int id, byte[] title, boolean removed, boolean mapped) {
+    private void onNativeWindow(int id, byte[] title, int[] pixels, boolean removed, boolean mapped) {
         if (removed) windows.remove(id);
-        else windows.put(id, new Window(Integer.toUnsignedLong(id), new String(title, java.nio.charset.StandardCharsets.UTF_8), mapped));
+        else {
+            Bitmap icon = pixels == null ? null : Bitmap.createBitmap(pixels, 64, 64, Bitmap.Config.ARGB_8888);
+            Window previous = windows.get(id);
+            if (icon != null && previous != null && previous.icon() != null && icon.sameAs(previous.icon())) {
+                icon.recycle();
+                icon = previous.icon();
+            }
+            windows.put(id, new Window(Integer.toUnsignedLong(id),
+                    new String(title, java.nio.charset.StandardCharsets.UTF_8), mapped, icon));
+        }
         windowsChanged = true;
     }
 

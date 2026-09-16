@@ -184,6 +184,43 @@ one owner should request whole-screen geometry when multiple outputs select
 XID zero. Custom X cursor presentation, non-text clipboard formats and
 out-of-viewport popup placement remain host integration work.
 
+## Hosted Window Input
+
+Individual outputs reconcile selected-window geometry after X position changes
+and Android Surface resizing. Negative saved positions are brought into the
+root's input area, moving the containing top-level frame when necessary, and
+the root grows to contain positive extents. Composite pixels and pointer hit
+testing therefore refer to reachable X coordinates. XID-zero outputs do not
+reposition clients; a whole Linux desktop retains its own window manager.
+An individual XID keeps the last size requested by its Android Surface even
+after client ConfigureWindow requests. If several outputs select the same XID,
+only the most recently resized output owns its size; other outputs fit the
+result with preserved aspect ratio. Releasing that owner transfers size control
+to a remaining sized output. This is event-driven reconciliation, not polling.
+
+`examples/input-window.c` creates a client at a negative saved position and logs
+ConfigureNotify and real pointer events. Open it as an individual output, verify
+that clicks arrive, then use `control-window ... geometry` to move it off-screen
+again and verify reconciliation without an Android resize. In a whole-desktop
+output the same initial position must remain untouched.
+Also request a different client size and verify it returns to the hosted size;
+repeat with two outputs and release the size owner to check there is no resize
+feedback loop. The fixture publishes a four-color `_NET_WM_ICON` for verifying
+Android task presentation independently of an installed application's icons.
+
+## Window Icons
+
+Catalog snapshots carry optional client `_NET_WM_ICON` images. The native parser
+validates the EWMH CARDINAL stream (at most one million values), chooses the
+closest suitable size and fits it into 64x64 ARGB pixels. Invalid or missing
+properties clear the icon. Pixel data follows the window-info header only when
+present; socket reads retain fragmented payloads before committing the catalog.
+Input and frame headers do not grow with the icon payload. The Java adapter
+publishes immutable Bitmap values and reuses unchanged icons.
+
+`examples/window-icon-test.c` exercises selection, aspect preservation, alpha,
+truncated properties, invalid sizes and allocation limits with a host C compiler.
+
 ## Optional DMA Copy
 
 AHardwareBuffer sources retain upstream's deferred EGL Present queue. Linear

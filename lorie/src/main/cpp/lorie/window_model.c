@@ -8,6 +8,7 @@
 #include <dix.h>
 #include "lorie.h"
 #include "window_model.h"
+#include "window_icon.h"
 
 extern ScreenPtr pScreenPtr;
 extern DeviceIntPtr lorieKeyboard;
@@ -17,6 +18,8 @@ typedef struct WindowRecord {
     XID id;
     Bool seen, mapped;
     char title[256];
+    Bool hasIcon;
+    uint32_t icon[LORIE_WINDOW_ICON_PIXELS];
 } WindowRecord;
 
 static WindowRecord* records;
@@ -118,12 +121,20 @@ static void publishWindow(WindowPtr window) {
     PropertyPtr value = property(window, "_NET_WM_NAME");
     if (!value || value->format != 8) value = property(window, "WM_NAME");
     if (value && value->format == 8) memcpy(title, value->data, min(value->size, sizeof(title) - 1));
-    if (added || record->mapped != window->realized || strcmp(record->title, title)) {
+    uint32_t icon[LORIE_WINDOW_ICON_PIXELS];
+    value = property(window, "_NET_WM_ICON");
+    Bool hasIcon = lorieWindowIcon(value && value->type == XA_CARDINAL && value->format == 32
+            ? value->data : NULL, value ? value->size : 0, icon);
+    if (added || record->mapped != window->realized || strcmp(record->title, title)
+            || record->hasIcon != hasIcon || memcmp(record->icon, icon, sizeof(icon))) {
         record->mapped = window->realized;
         memcpy(record->title, title, sizeof(title));
-        lorieEvent event = {.windowInfo = {.t = EVENT_OUTPUT_WINDOW, .mapped = record->mapped, .window = record->id}};
+        record->hasIcon = hasIcon;
+        memcpy(record->icon, icon, sizeof(icon));
+        lorieEvent event = {.windowInfo = {.t = EVENT_OUTPUT_WINDOW, .mapped = record->mapped,
+                .window = record->id, .hasIcon = hasIcon}};
         memcpy(event.windowInfo.title, title, sizeof(title));
-        lorieSendOutputFrame(&event);
+        lorieSendWindowInfo(&event, icon);
     }
 }
 
@@ -221,6 +232,7 @@ static Bool onDestroy(WindowPtr w) {
 }
 static Bool onPosition(WindowPtr w, int x, int y) {
     dirty = TRUE;
+    lorieOutputGeometryChanged();
     ScreenPtr screen = w->drawable.pScreen;
     screen->PositionWindow = position;
     Bool result = screen->PositionWindow(w, x, y);

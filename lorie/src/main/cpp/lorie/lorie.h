@@ -198,7 +198,7 @@ typedef union {
         uint64_t bufferId;
     } layer;
     struct {
-        uint8_t t, removed, mapped;
+        uint8_t t, removed, mapped, hasIcon;
         uint32_t window;
         char title[256];
     } windowInfo;
@@ -212,12 +212,14 @@ enum { LORIE_OUTPUT_BIND, LORIE_OUTPUT_RESIZE, LORIE_OUTPUT_POINTER,
 void lorieOutputCommand(const lorieEvent* event);
 void lorieEmbeddedServerReady(void);
 void lorieOutputWindowDestroyed(XID id);
+void lorieOutputGeometryChanged(void);
 void loriePrepareOutputs(void);
 void loriePublishOutputs(struct lorie_shared_server_state* state);
 void lorieResetOutputs(void);
 struct _Pixmap;
 LorieBuffer* lorieExportPixmap(struct _Pixmap* pixmap);
 void lorieSendOutputFrame(const lorieEvent* event);
+void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon);
 
 typedef struct { int16_t x1, y1, x2, y2; } LorieGpuCopyRect;
 
