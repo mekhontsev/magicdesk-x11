@@ -25,6 +25,13 @@ connection/output recreation and owner-death/normal-shutdown cleanup. Exercise
 both ordinary pixmaps and the AHardwareBuffer Present fixture. Build checks
 alone do not establish support on a new Android release or graphics driver.
 
+Also exercise clipboard and XDND with `examples/content-window.c`: text, HTML,
+PNG, readable file paths, large INCR selections and same-/cross-server drops.
+Verify source loss, cancellation, bounded transfers and owner-death cleanup.
+Run Android content-grant and clipboard-focus workflows in the embedding host;
+the example alone cannot verify its authorization policy. Geometry, icon and
+density fixtures are described in [Embedding](embedding.md).
+
 CI packages corresponding source with initialized submodules before native
 configuration: upstream CMake applies tracked patches inside submodule
 worktrees. The source archive therefore contains pinned upstream sources and
