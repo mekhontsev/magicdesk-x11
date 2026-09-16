@@ -43,6 +43,7 @@ public final class X11Session implements AutoCloseable {
     private String clipboard = "";
     private volatile boolean clipboardEnabled;
     private boolean windowsChanged;
+    private int dpi;
 
     public X11Session(Executor callbacks, Listener listener) {
         this.callbacks = java.util.Objects.requireNonNull(callbacks);
@@ -71,6 +72,7 @@ public final class X11Session implements AutoCloseable {
                     throw new IllegalStateException("Cannot connect X11 server");
                 }
                 connected = true;
+                if (dpi != 0) nativeCommand(nativeHandle, 0, 0, 9, dpi, 0, 0, false);
                 windows.clear();
                 nativeCommand(nativeHandle, 0, 0, 7, 0, 0, 0, false);
                 for (Output output : outputs.values()) {
@@ -90,6 +92,17 @@ public final class X11Session implements AutoCloseable {
         if (windowId <= 0 || windowId > 0xffffffffL) throw new IllegalArgumentException("Invalid X11 window ID");
         dispatch(() -> {
             if (connected) nativeCommand(nativeHandle, 0, (int)windowId, 8, 0, 0, 0, false);
+            return null;
+        }, true);
+    }
+
+    /** Logical density of this X screen. Toolkits receive normal XSettings/RandR events. */
+    public void setDpi(int value) {
+        if (value < 24 || value > 1536) throw new IllegalArgumentException("Invalid X11 DPI");
+        dispatch(() -> {
+            if (dpi == value) return null;
+            dpi = value;
+            if (connected) nativeCommand(nativeHandle, 0, 0, 9, dpi, 0, 0, false);
             return null;
         }, true);
     }

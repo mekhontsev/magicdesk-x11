@@ -308,6 +308,7 @@ Bool drawSquares() {
 }
 
 void ddxReady(void) {
+    if (getenv("MAGICDESK_X11_SESSION")) lorieDensityInit();
     // Xorg has allocated DISPLAY and initialized screens, sockets and input before this boundary.
     lorieEmbeddedServerReady();
     CursorVisible = TRUE;
@@ -634,6 +635,7 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 }
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
+    lorieDensityReset();
     lorieResetOutputs();
     pScreenPtr = NULL;
     pScreen->DestroyPixmap(pScreen->devPrivate);
@@ -697,6 +699,8 @@ static Bool lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height,
     pScreen->root->drawable.height = pvfb->root.height = pScreen->height = height;
     pScreen->mmWidth = ((double) (width)) * 25.4 / monitorResolution;
     pScreen->mmHeight = ((double) (height)) * 25.4 / monitorResolution;
+    RROutputPtr output = RRFirstOutput(pScreen);
+    if (output) RROutputSetPhysicalSize(output, pScreen->mmWidth, pScreen->mmHeight);
 
     oldPixmap = pScreen->GetScreenPixmap(pScreen);
     newPixmap = pScreen->CreatePixmap(pScreen, width, height, pScreen->rootDepth, CREATE_PIXMAP_USAGE_LORIEBUFFER_BACKED);
@@ -857,7 +861,7 @@ void lorieConfigureNotify(int width, int height, int framerate, size_t name_size
         CARD32 mmWidth, mmHeight;
         RRModePtr mode = lorieCvt(width, height, framerate);
         mmWidth = ((double) (mode->mode.width)) * 25.4 / monitorResolution;
-        mmHeight = ((double) (mode->mode.width)) * 25.4 / monitorResolution;
+        mmHeight = ((double) (mode->mode.height)) * 25.4 / monitorResolution;
         RROutputSetModes(output, &mode, 1, 0);
         RRCrtcNotify(RRFirstEnabledCrtc(pScreen), mode, 0, 0, RR_Rotate_0, NULL, 1, &output);
         RRScreenSizeSet(pScreen, mode->mode.width, mode->mode.height, mmWidth, mmHeight);

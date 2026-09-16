@@ -103,6 +103,7 @@ void lorieResetOutputs(void) {
 void lorieOutputCommand(const lorieEvent* event) {
     if (!pScreenPtr || !pScreenPtr->root) return;
     if (event->output.operation == LORIE_OUTPUT_OBSERVE) { lorieWindowModelObserve(); return; }
+    if (event->output.operation == LORIE_OUTPUT_DPI) { lorieSetDpi(event->output.x); return; }
     if (event->output.operation == LORIE_OUTPUT_CLOSE) { lorieWindowClose(event->output.window); return; }
     if (!event->output.output) return;
     OutputSelection** link = &selections;

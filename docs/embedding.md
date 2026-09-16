@@ -43,6 +43,7 @@ generates a fresh unpredictable token for each pending session and launches
 | `MAGICDESK_X11_TOKEN` | Pending-session authentication token |
 | `MAGICDESK_X11_LIBRARY` | Host's extracted `nativeLibraryDir/libXlorie.so` |
 | `MAGICDESK_X11_OWNER_REQUIRED` | Require an authenticated owner before starting Xorg |
+| `MAGICDESK_X11_XSETTINGS` | `1` enables the embedded XSettings manager for dedicated application sessions |
 | `TMPDIR` | X socket/runtime directory in the selected Termux/container environment |
 | `XKB_CONFIG_ROOT` | Keyboard configuration files from that environment |
 
@@ -220,6 +221,38 @@ publishes immutable Bitmap values and reuses unchanged icons.
 
 `examples/window-icon-test.c` exercises selection, aspect preservation, alpha,
 truncated properties, invalid sizes and allocation limits with a host C compiler.
+
+## Logical Density
+
+Pass the initial X11 density using Xorg's `-dpi`; `X11Session.setDpi` updates it
+through the existing server command stream. The host selects density ownership
+when several Android windows share one X screen. The library does not inspect
+Android displays, poll tasks or scale captured pixels.
+
+Embedded startup publishes `Xft.dpi` in the root resource database. Updates
+retain ownership only while that database is unchanged. Dedicated application
+sessions additionally own an unmapped InputOnly XSettings window with atomic
+`Xft/DPI`, `Gdk/WindowScalingFactor` and `Gdk/UnscaledDPI` settings. The GTK integer
+scale is the nearest positive integer; font DPI retains the fractional remainder.
+A replacement XSettings owner destroys the old manager window and is never
+displaced. Whole-desktop sessions should leave this manager disabled so their
+Linux settings daemon can own the selection normally.
+
+Density commands update RandR millimetres and send normal setting/geometry
+notifications. Resizing retains density on both axes. They do not reallocate
+the screen pixmap solely for a DPI change. Bounds and input stay in X pixels.
+Toolkit-specific environment overrides remain application-owned.
+`examples/density-settings-test.c` checks the fixed, bounded XSettings wire
+format and the integer-widget/fractional-font conversion.
+
+`examples/density-window.c` is a GTK 3 client for live density and input checks.
+It reports toolkit scaling changes and retains its button state across resizes.
+Build in Termux with the GTK 3 development files available, then run the binary
+as a session command:
+
+```sh
+clang examples/density-window.c -o build/density-window $(pkg-config --cflags --libs gtk+-3.0)
+```
 
 ## Optional DMA Copy
 

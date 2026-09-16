@@ -208,7 +208,10 @@ typedef union {
 
 enum { LORIE_OUTPUT_BIND, LORIE_OUTPUT_RESIZE, LORIE_OUTPUT_POINTER,
     LORIE_OUTPUT_KEY, LORIE_OUTPUT_RELEASE, LORIE_OUTPUT_FOCUS, LORIE_OUTPUT_TEXT,
-    LORIE_OUTPUT_OBSERVE, LORIE_OUTPUT_CLOSE };
+    LORIE_OUTPUT_OBSERVE, LORIE_OUTPUT_CLOSE, LORIE_OUTPUT_DPI };
+void lorieDensityInit(void);
+void lorieDensityReset(void);
+void lorieSetDpi(int dpi);
 void lorieOutputCommand(const lorieEvent* event);
 void lorieEmbeddedServerReady(void);
 void lorieOutputWindowDestroyed(XID id);
