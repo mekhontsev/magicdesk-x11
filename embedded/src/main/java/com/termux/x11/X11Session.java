@@ -22,7 +22,8 @@ public final class X11Session implements AutoCloseable {
         void onFrame(Output output, int width, int height, boolean available);
         void onDisconnected();
         default void onWindowsChanged(java.util.List<Window> windows) { }
-        default void onClipboard(String text) { }
+        default void onDataOffer(X11DataExchange.Offer offer) { }
+        default void onDragEvent(int operation, int output, boolean accepted) { }
     }
 
     public record Window(long id, String title, boolean mapped, Bitmap icon) { }
@@ -40,8 +41,7 @@ public final class X11Session implements AutoCloseable {
     private boolean connected;
     private int nextOutputId;
     private long nativeHandle;
-    private String clipboard = "";
-    private volatile boolean clipboardEnabled;
+    private final X11DataExchange dataExchange;
     private boolean windowsChanged;
     private int dpi;
 
@@ -50,6 +50,23 @@ public final class X11Session implements AutoCloseable {
         this.listener = java.util.Objects.requireNonNull(listener);
         thread.start();
         handler = new Handler(thread.getLooper());
+        dataExchange = new X11DataExchange(handler, callbacks, new X11DataExchange.Listener() {
+            @Override public void onOffer(X11DataExchange.Offer offer) { listener.onDataOffer(offer); }
+            @Override public void onDragEvent(int operation, int output, boolean accepted) {
+                listener.onDragEvent(operation, output, accepted);
+            }
+        }, (operation, channel, serial, offer, output, window, x, y, type, descriptor) -> {
+            final ParcelFileDescriptor copy;
+            try { copy = descriptor == null ? null : ParcelFileDescriptor.dup(descriptor.getFileDescriptor()); }
+            catch (java.io.IOException error) { throw new IllegalStateException("Cannot retain content descriptor", error); }
+            Runnable send = () -> {
+                try (copy) {
+                    if (!closed && connected) nativeData(nativeHandle, operation, channel, serial, offer, output, window, x, y,
+                            type, copy == null ? -1 : copy.getFd());
+                } catch (java.io.IOException error) { android.util.Log.w("X11Content", "Descriptor close failed", error); }
+            };
+            if (!handler.post(send) && copy != null) try { copy.close(); } catch (java.io.IOException ignored) { }
+        });
         try {
             call(() -> {
                 nativeHandle = nativeCreate();
@@ -72,6 +89,7 @@ public final class X11Session implements AutoCloseable {
                     throw new IllegalStateException("Cannot connect X11 server");
                 }
                 connected = true;
+                nativeData(nativeHandle, X11DataExchange.ENABLE, 0, 0, 0, 0, 0, 0, 0, "", -1);
                 if (dpi != 0) nativeCommand(nativeHandle, 0, 0, 9, dpi, 0, 0, false);
                 windows.clear();
                 nativeCommand(nativeHandle, 0, 0, 7, 0, 0, 0, false);
@@ -129,36 +147,12 @@ public final class X11Session implements AutoCloseable {
         callbacks.execute(() -> { if (!closed) listener.onWindowsChanged(snapshot); });
     }
 
-    /** Only the focused Android host enables clipboard synchronization. */
-    public void setClipboardEnabled(boolean enabled) {
-        dispatch(() -> {
-            clipboardEnabled = enabled;
-            if (connected) nativeClipboard(nativeHandle, enabled ? 1 : 0, null);
-            return null;
-        }, true);
-    }
+    public X11DataExchange dataExchange() { return dataExchange; }
 
-    public void offerClipboard(String text) {
-        byte[] bytes = text.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        if (bytes.length > 1024 * 1024 || text.indexOf('\0') >= 0)
-            throw new IllegalArgumentException("X11 clipboard text exceeds the protocol limit");
-        dispatch(() -> {
-            if (clipboardEnabled && connected && !text.equals(clipboard)) {
-                clipboard = text;
-                nativeClipboard(nativeHandle, 2, null);
-            }
-            return null;
-        }, true);
-    }
-
-    private void onNativeClipboardRequest() {
-        nativeClipboard(nativeHandle, 3, (clipboardEnabled ? clipboard : "").getBytes(java.nio.charset.StandardCharsets.UTF_8));
-    }
-
-    private void onNativeClipboard(byte[] data) {
-        String text = new String(data, java.nio.charset.StandardCharsets.UTF_8);
-        clipboard = text;
-        callbacks.execute(() -> { if (!closed && clipboardEnabled) listener.onClipboard(text); });
+    private void onNativeData(int operation, int channel, int serial, int offer, int output, int window,
+            int x, int y, String type, int descriptor) {
+        dataExchange.receive(operation, channel, serial, offer, output, window, x, y, type,
+                descriptor < 0 ? null : ParcelFileDescriptor.adoptFd(descriptor));
     }
 
     /** XID zero selects the whole X screen, not an Android display ID. */
@@ -264,10 +258,12 @@ public final class X11Session implements AutoCloseable {
 
     private void onNativeDisconnected() {
         connected = false;
+        dataExchange.disconnected();
         callbacks.execute(() -> { if (!closed) listener.onDisconnected(); });
     }
 
     @Override public void close() {
+        dataExchange.close();
         FutureTask<Void> task;
         synchronized (submissions) {
             if (closed) return;
@@ -334,6 +330,7 @@ public final class X11Session implements AutoCloseable {
     private static native void nativeSurface(long handle, int output, Surface surface, boolean release);
     private static native void nativeCommand(long handle, int output, int window, int operation, int x, int y, int detail, boolean down);
     private static native void nativeText(long handle, int output, int window, String text);
-    private static native void nativeClipboard(long handle, int operation, byte[] text);
+    private static native void nativeData(long handle, int operation, int channel, int serial, int offer,
+            int output, int window, int x, int y, String type, int descriptor);
     private static native void nativeDestroy(long handle);
 }

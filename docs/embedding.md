@@ -175,15 +175,42 @@ otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`. `closeWindow` sends
 Output destruction itself still releases only a presentation. The host
 decides when to close clients and retained/application sessions.
 
-The focused host enables UTF-8 text clipboard exchange explicitly. Transfers
-are bounded to 1 MiB; fragmented stream payloads are assembled before callback
-delivery. The module does not access Android's ClipboardManager directly.
+The focused host enables clipboard exchange through `X11Session.dataExchange()`.
+`X11DataExchange.Source` publishes MIME target names and opens independently
+owned seekable descriptors on demand. `Offer.open()` must run on a worker, never
+the renderer or callback thread. Clipboard and XDND have separate selections,
+generation IDs and lifetimes. The native engine handles TARGETS, TIMESTAMP and
+INCR with a 128 MiB per-transfer limit, 16 pending requests and 30-second protocol
+deadlines. It does not access Android's ClipboardManager or content providers.
+
+Android drag hosts publish a DRAG offer, then send ENTER/MOVE/LEAVE/DROP in output
+coordinates. Drop waits for target acceptance and reports FINISH. An X11 source
+offer includes its output identity: the host can start Android drag-and-drop,
+send BEGIN and report FINISH/CANCEL. An X-side destination retains the toolkit's
+pointer-grab/drop handshake while Android owns the gesture. Copy is the supported
+action. Same-server drops retain the original XdndSelection; cross-server drops
+use host-provided data. Source disappearance, timeout and disconnect cancel work.
+
+The retained Binder owner can open local regular files and import content FDs
+through `ICmdEntryInterface`. Access uses the server process UID, never an elevated
+host identity. For file imports the launcher supplies a fresh private
+`MAGICDESK_X11_CONTENT_DIR` and removes it after server exit. Imports survive
+individual drag completion, with a 256 MiB/128-file session bound. Namespace
+translation for containers is not implicit. Host-managed Android URI grants,
+exports and clipboard-origin metadata remain outside this module.
 
 The host owns Android task placement, application discovery, IME and session
 lifecycle. It must not conflate an Android display ID, output ID and XID. Only
 one owner should request whole-screen geometry when multiple outputs select
-XID zero. Custom X cursor presentation, non-text clipboard formats and
-out-of-viewport popup placement remain host integration work.
+XID zero. Custom X cursor presentation and out-of-viewport popup placement
+remain host integration work.
+
+`examples/content-window.c` is a GTK clipboard/XDND fixture for text, HTML, PNG
+and files, including a 700,000-byte INCR text selection. Build it with
+`cc examples/content-window.c -o content-window $(pkg-config --cflags --libs gtk+-3.0)`
+and launch it inside independent sessions. Receipts report byte counts and hashes;
+file drops also check readability in the receiving environment. No test client
+dependency is linked into the Android library.
 
 ## Hosted Window Input
 

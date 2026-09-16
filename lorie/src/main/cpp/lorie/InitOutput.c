@@ -635,6 +635,7 @@ static Bool lorieCreateScreenResources(ScreenPtr pScreen) {
 }
 
 static Bool lorieCloseScreen(ScreenPtr pScreen) {
+    lorieDataShutdown();
     lorieDensityReset();
     lorieResetOutputs();
     pScreenPtr = NULL;
@@ -895,6 +896,7 @@ void InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
     rendererTestCapabilities(&pvfb->root.legacyDrawing, &pvfb->gpuPresentDisabled);
     xorgGlxCreateVendor();
     lorieInitClipboard();
+    lorieDataInit();
     if (-1 == AddScreen(lorieScreenInit, argc, argv)) {
         FatalError("Couldn't add screen\n");
     }

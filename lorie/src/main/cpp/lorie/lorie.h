@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include "linux/input-event-codes.h"
 #include "buffer.h"
+#include "data_exchange.h"
 
 #define PORT 7892
 #define MAGIC "0xDEADBEEF"
@@ -121,10 +122,12 @@ typedef enum {
     EVENT_OUTPUT_LAYER,
     EVENT_OUTPUT_WINDOW,
     EVENT_OUTPUT_WINDOWS_DONE,
+    EVENT_DATA,
 } eventType;
 
 typedef union {
     uint8_t type;
+    LorieDataEvent data;
     struct {
         uint8_t t;
         uint16_t width, height, framerate;

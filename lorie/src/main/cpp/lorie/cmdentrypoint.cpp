@@ -16,6 +16,7 @@
 #include <sys/ioctl.h>
 #include <libgen.h>
 #include <cerrno>
+#include <atomic>
 extern "C" {
 #include <globals.h>
 #define class lorie_reserved_class
@@ -38,6 +39,7 @@ extern "C" {
 static int argc = 0;
 static char** argv = nullptr;
 __LIBC_HIDDEN__ volatile int conn_fd = -1;
+static std::atomic<uint64_t> dataConnection{0};
 extern DeviceIntPtr lorieMouse, lorieTouch, lorieKeyboard, loriePen, lorieEraser;
 extern ScreenPtr pScreenPtr;
 extern "C" int ucs2keysym(long ucs);
@@ -274,6 +276,12 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
         close(fd);
         conn_fd = -1;
         lorieEnableClipboardSync(FALSE);
+        uint64_t generation = ++dataConnection;
+        QueueWorkProc(+[](__unused ClientPtr client, void* closure) -> Bool {
+            if (dataConnection.load() == (uint64_t)(uintptr_t)closure) lorieDataReset();
+            return TRUE;
+        }, nullptr, (void*)(uintptr_t)generation);
+        lorieWakeServer();
         while ((buf = LorieBufferList_first(&registeredBuffers)))
             LorieBuffer_removeFromList(buf);
         return;
@@ -416,6 +424,30 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
             case EVENT_CLIPBOARD_ENABLE:
                 lorieEnableClipboardSync(e.clipboardEnable.enable);
                 break;
+            case EVENT_DATA: {
+                struct Command { LorieDataEvent event; int fd; uint64_t generation; };
+                int descriptor = e.data.hasFd ? ancil_recv_fd(fd) : -1;
+                if (e.data.hasFd && descriptor < 0) { handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+                auto* command = (Command*)calloc(1, sizeof(Command));
+                if (!command) { if (descriptor >= 0) close(descriptor); handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+                command->event = e.data;
+                command->fd = descriptor;
+                command->generation = dataConnection.load();
+                if (!QueueWorkProc(+[](__unused ClientPtr client, void* closure) -> Bool {
+                    auto* command = (Command*)closure;
+                    if (command->generation == dataConnection.load()) lorieDataCommand(&command->event, command->fd);
+                    else if (command->fd >= 0) close(command->fd);
+                    free(command);
+                    return TRUE;
+                }, nullptr, command)) {
+                    if (descriptor >= 0) close(descriptor);
+                    free(command);
+                    handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr);
+                    return;
+                }
+                lorieWakeServer();
+                break;
+            }
             case EVENT_CLIPBOARD_ANNOUNCE:
                 QueueWorkProc(+[](__unused ClientPtr pClient, __unused void *closure) -> Bool {
                     // This must be done only on X server thread.
@@ -514,6 +546,16 @@ void lorieSendClipboardData(const char* data) {
     }
 }
 
+void lorieSendDataEvent(const LorieDataEvent* data, int descriptor) {
+    if (conn_fd < 0) return;
+    lorieEvent event{};
+    event.data = *data;
+    event.data.t = EVENT_DATA;
+    event.data.hasFd = descriptor >= 0;
+    if (sendData(&event, sizeof(event)) && descriptor >= 0 && ancil_send_fd(conn_fd, descriptor) < 0)
+        shutdown(conn_fd, SHUT_RDWR);
+}
+
 void lorieSendSyncReply(uint32_t serial) {
     if (conn_fd != -1) {
         lorieEvent e = { .sync = { .t = EVENT_SYNC_REPLY, .serial = serial } };
@@ -598,6 +640,8 @@ static jobject getXConnection(JNIEnv *env, __unused jobject cls) {
             InputThreadUnregisterDev(conn_fd);
             close(conn_fd);
         }
+        ++dataConnection;
+        lorieDataReset();
         lorieResetOutputs();
         headerBytes = 0;
         LorieBuffer* buffer;

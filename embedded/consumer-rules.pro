@@ -1,4 +1,5 @@
 -keep class com.termux.x11.CmdEntryPoint { *; }
 -keep class com.termux.x11.ICmdEntryInterface** { *; }
 -keep class com.termux.x11.X11Session { *; }
+-keep class com.termux.x11.X11DataExchange { *; }
 -keepclasseswithmembernames class * { native <methods>; }

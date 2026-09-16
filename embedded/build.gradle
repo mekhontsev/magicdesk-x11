@@ -7,7 +7,7 @@ def nativeDirectory = layout.buildDirectory.dir('native').get().asFile
 def jniDirectory = layout.buildDirectory.dir('jniLibs').get().asFile
 def serverSources = layout.buildDirectory.dir('serverSources').get().asFile
 def collectServerSources = tasks.register('collectServerSources', Sync) {
-    from('../lorie/src/main/java') { include 'com/termux/x11/CmdEntryPoint.java' }
+    from('../lorie/src/main/java') { include 'com/termux/x11/CmdEntryPoint.java', 'com/termux/x11/X11FileExchange.java' }
     into serverSources
 }
 def licenseAssets = layout.buildDirectory.dir('licenseAssets').get().asFile

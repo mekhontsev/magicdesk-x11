@@ -38,12 +38,14 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     private boolean broadcastPending;
     private volatile IBinder lifetime;
     private boolean ready;
-    private boolean stopping;
+    private volatile boolean stopping;
     private String[] ownedArguments;
     private final Runnable ownershipTimeout = () -> {
         if (lifetime == null) System.exit(1);
     };
     private final IBinder.DeathRecipient ownerDied = this::stop;
+    private final X11FileExchange contentFiles = new X11FileExchange();
+    private int ownerUid = -1;
 
     @Override public synchronized void retain(IBinder owner) throws RemoteException {
         if (System.getenv("MAGICDESK_X11_SESSION") == null)
@@ -54,6 +56,7 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
         }
         java.util.Objects.requireNonNull(owner).linkToDeath(ownerDied, 0);
         lifetime = owner;
+        ownerUid = Binder.getCallingUid();
         handler.post(() -> {
             handler.removeCallbacks(ownershipTimeout);
             if (stopping || ownedArguments == null) return;
@@ -65,11 +68,29 @@ public class CmdEntryPoint extends ICmdEntryInterface.Stub {
     @Override public void stop() {
         handler.post(() -> {
             stopping = true;
+            contentFiles.close();
             if (ready) stopServer();
             else if (ownedArguments != null) System.exit(0);
         });
     }
     private native void stopServer();
+
+    private synchronized void requireContentOwner() {
+        if (lifetime == null || Binder.getCallingUid() != ownerUid || stopping)
+            throw new SecurityException("X11 content access requires the retained session owner");
+    }
+
+    @Override public ParcelFileDescriptor openContentFile(String uri) {
+        requireContentOwner();
+        try { return contentFiles.open(uri); }
+        catch (java.io.IOException error) { throw new IllegalArgumentException(error.getMessage(), error); }
+    }
+
+    @Override public String importContentFile(ParcelFileDescriptor descriptor, String name) {
+        requireContentOwner();
+        try { return contentFiles.importFile(descriptor, name); }
+        catch (java.io.IOException error) { throw new IllegalArgumentException(error.getMessage(), error); }
+    }
 
     /**
      * Command-line entry point.

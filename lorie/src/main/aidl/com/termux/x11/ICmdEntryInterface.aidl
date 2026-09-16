@@ -8,4 +8,6 @@ interface ICmdEntryInterface {
     ParcelFileDescriptor getLogcatOutput();
     void retain(IBinder owner);
     oneway void stop();
+    ParcelFileDescriptor openContentFile(String uri);
+    String importContentFile(in ParcelFileDescriptor source, String name);
 }

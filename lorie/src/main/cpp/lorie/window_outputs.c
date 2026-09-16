@@ -39,6 +39,19 @@ typedef struct OutputSelection {
 static OutputSelection* selections;
 static WindowImage* images;
 
+Bool lorieOutputPoint(uint32_t id, uint32_t xid, int x, int y, WindowPtr* selected, int* rootX, int* rootY) {
+    for (OutputSelection* output = selections; output; output = output->next) {
+        if (output->id != id || output->window != xid || output->dead) continue;
+        WindowPtr window = pScreenPtr->root;
+        if (xid && dixLookupWindow(&window, xid, serverClient, DixReadAccess) != Success) return FALSE;
+        *selected = window;
+        *rootX = window->drawable.x + max(0, min(x, 10000)) * (window->drawable.width - 1) / 10000;
+        *rootY = window->drawable.y + max(0, min(y, 10000)) * (window->drawable.height - 1) / 10000;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 void lorieOutputGeometryChanged(void) {
     for (OutputSelection* output = selections; output; output = output->next)
         if (output->window) output->geometryPending = TRUE;
@@ -146,6 +159,7 @@ void lorieOutputCommand(const lorieEvent* event) {
         lorieWindowFocus(window);
     }
     if (event->output.operation == LORIE_OUTPUT_POINTER) {
+        lorieDataPointer(output->id, output->window, event->output.detail, event->output.down);
         ValuatorMask mask;
         valuator_mask_zero(&mask);
         int x = max(0, min(event->output.x, 10000)) * (window->drawable.width - 1) / 10000;
