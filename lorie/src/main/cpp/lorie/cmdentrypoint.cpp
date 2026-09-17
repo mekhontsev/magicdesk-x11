@@ -7,9 +7,7 @@
 #ifdef HAVE_DIX_CONFIG_H
 #include <dix-config.h>
 #endif
-#include <jni.h>
 #include <android/log.h>
-#include <android/native_window_jni.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/prctl.h>
@@ -32,6 +30,7 @@ extern "C" {
 #include <arpa/inet.h>
 #include <poll.h>
 #include "lorie.h"
+#include "embedded.h"
 #include "window_icon.h"
 #include "gpu_completion.h"
 #include "socket_io.h"
@@ -70,183 +69,55 @@ char *xtrans_unix_dir_x11 = nullptr;
 
 struct xorg_list registeredBuffers;
 
-static JNIEnv* serverEnv = nullptr;
-static jobject thiz = nullptr;
-static jmethodID sendBroadcast = nullptr;
-static jmethodID sendBroadcastDelayed = nullptr;
+static void (*serverReady)(void*, const char*);
+static void* serverContext;
 static lorieEvent incoming;
 static size_t headerBytes;
+static bool started;
 
-static jboolean start(JNIEnv *env, jobject self, jobjectArray args) {
-    pthread_t t;
-    JavaVM* vm = nullptr;
-
-    thiz = env->NewGlobalRef(self);
-    if (!thiz)
-        FatalError("Failed to create a global reference for the CmdEntryPoint instance");
-    sendBroadcast = env->GetMethodID(env->GetObjectClass(self), "sendBroadcast", "()V");
-    sendBroadcastDelayed = env->GetMethodID(env->GetObjectClass(self), "sendBroadcastDelayed", "()V");
-    auto detectTracer = []() -> Bool {
-        FILE *fp;
-        char line[256];
-        int pid = 0;
-
-        fp = fopen("/proc/self/status", "r");
-        if (!fp)
-            return TRUE;
-
-        while (fgets(line, sizeof(line), fp)) {
-            if (strncmp(line, "TracerPid:", 10) == 0) {
-                pid = (int) strtol(line + 10, nullptr, 10);
-                break;
-            }
-        }
-
-        if (pid != 0)
-            log(INFO, "Tracer detected");
-
-        fclose(fp);
-        return pid != 0;
-    };
-    // execv's argv array is a bit incompatible with Java's String[], so we do some converting here...
-    argc = env->GetArrayLength(args) + 1; // Leading executable path
-    argv = (char**) calloc(argc, sizeof(char*));
-
-    argv[0] = (char*) "Xlorie";
-    for(int i=1; i<argc; i++) {
-        auto js = (jstring) env->GetObjectArrayElement(args, i - 1);
-        const char *pjc = env->GetStringUTFChars(js, JNI_FALSE);
-        argv[i] = (char *) calloc(strlen(pjc) + 1, sizeof(char)); //Extra char for the terminating NULL
-        strcpy((char *) argv[i], pjc);
-        env->ReleaseStringUTFChars(js, pjc);
+bool lorieServerStart(int count, const char* const* arguments,
+        void (*ready)(void*, const char*), void* context) {
+    if (started || count < 0 || !ready) return false;
+    const char* tmp = getenv("TMPDIR");
+    const char* xkb = getenv("XKB_CONFIG_ROOT");
+    if (!tmp || tmp[0] != '/' || access(tmp, W_OK | X_OK) ||
+            !xkb || xkb[0] != '/' || access(xkb, R_OK | X_OK)) {
+        log(ERROR, "X11 requires accessible TMPDIR and XKB_CONFIG_ROOT");
+        return false;
     }
-
-    {
-        cpu_set_t mask;
-        CPU_ZERO(&mask);
-        long num_cpus = sysconf(_SC_NPROCESSORS_ONLN);
-
-        for (int i = num_cpus/2; i < num_cpus; i++)
-            CPU_SET(i, &mask);
-
-        if (sched_setaffinity(0, sizeof(cpu_set_t), &mask) == -1)
-            log(ERROR, "Failed to set process affinity: %s", strerror(errno));
+    argc = count + 1;
+    argv = (char**)calloc(argc + 1, sizeof(char*));
+    if (!argv) return false;
+    argv[0] = strdup("Xlorie");
+    for (int i = 0; i < count; ++i) argv[i + 1] = strdup(arguments[i]);
+    for (int i = 0; i < argc; ++i) if (!argv[i]) {
+        for (int j = 0; j < argc; ++j) free(argv[j]);
+        free(argv);
+        return false;
     }
-
-    if (getenv("TERMUX_X11_DEBUG") && !fork()) {
-        // Printing logs of local logcat.
-        char pid[32] = {0};
-        prctl(PR_SET_PDEATHSIG, SIGTERM);
-        sprintf(pid, "%d", getppid());
-        execlp("logcat", "logcat", "--pid", pid, nullptr);
-    }
-
-    // No matter what tracer is attached.
-    // In the case of gdb or lldb LD_PRELOAD is already set.
-    // In the case of proot or proot-distro libtermux-exec in LD_PRELOAD will break linking.
-    if (!getenv("MAGICDESK_X11_SESSION") &&
-            access("/data/data/com.termux/files/usr/lib/libtermux-exec.so", F_OK) == 0 && !detectTracer()
-            && !getenv("XSTARTUP_LD_PRELOAD"))
-        setenv("LD_PRELOAD", "/data/data/com.termux/files/usr/lib/libtermux-exec.so", 1);
-
-    // adb sets TMPDIR to /data/local/tmp which is pretty useless.
-    if (!strcmp("/data/local/tmp", getenv("TMPDIR") ?: ""))
-        unsetenv("TMPDIR");
-
-    if (!getenv("TMPDIR")) {
-        if (access("/tmp", F_OK) == 0)
-            setenv("TMPDIR", "/tmp", 1);
-        else if (access("/data/data/com.termux/files/usr/tmp", F_OK) == 0)
-            setenv("TMPDIR", "/data/data/com.termux/files/usr/tmp", 1);
-    }
-
-    if (!getenv("TMPDIR")) {
-        char* error = (char*) "$TMPDIR is not set. Normally it is pointing to /tmp of a container.";
-        log(ERROR, "%s", error);
-        dprintf(2, "%s\n", error);
-        return JNI_FALSE;
-    }
-
-    {
-        char* tmp = getenv("TMPDIR");
-        char cwd[1024] = {0};
-
-        if (!getcwd(cwd, sizeof(cwd)) || access(cwd, F_OK) != 0)
-            chdir(tmp);
-        asprintf(&xtrans_unix_path_x11, "%s/.X11-unix/X", tmp);
-        asprintf(&xtrans_unix_dir_x11, "%s/.X11-unix/", tmp);
-    }
-
-    log(VERBOSE, "Using TMPDIR=\"%s\"", getenv("TMPDIR"));
-
-    {
-        const char *root_dir = dirname(getenv("TMPDIR"));
-        const char* pathes[] = {
-                "/etc/X11/fonts", "/usr/share/fonts/X11", "/share/fonts", nullptr
-        };
-        for (int i=0; pathes[i]; i++) {
-            char current_path[1024] = {0};
-            snprintf(current_path, sizeof(current_path), "%s%s", root_dir, pathes[i]);
-            if (access(current_path, F_OK) == 0) {
-                char default_font_path[4096] = {0};
-                snprintf(default_font_path, sizeof(default_font_path),
-                         "%s/misc,%s/TTF,%s/OTF,%s/Type1,%s/100dpi,%s/75dpi",
-                         current_path, current_path, current_path, current_path, current_path, current_path);
-                defaultFontPath = strdup(default_font_path);
-                break;
-            }
-        }
-    }
-
-    if (!getenv("XKB_CONFIG_ROOT")) {
-        // chroot case
-        const char *root_dir = dirname(getenv("TMPDIR"));
-        char current_path[1024] = {0};
-        snprintf(current_path, sizeof(current_path), "%s/usr/share/X11/xkb", root_dir);
-        if (access(current_path, F_OK) == 0)
-            setenv("XKB_CONFIG_ROOT", current_path, 1);
-    }
-
-    if (!getenv("XKB_CONFIG_ROOT")) {
-        // proot case
-        if (access("/usr/share/xkeyboard-config-2", F_OK) == 0)
-            setenv("XKB_CONFIG_ROOT", "/usr/share/xkeyboard-config-2", 1);
-        else if (access("/usr/share/X11/xkb", F_OK) == 0)
-            setenv("XKB_CONFIG_ROOT", "/usr/share/X11/xkb", 1);
-        // Termux case
-        else if (access("/data/data/com.termux/files/usr/share/xkeyboard-config-2", F_OK) == 0)
-            setenv("XKB_CONFIG_ROOT", "/data/data/com.termux/files/usr/share/xkeyboard-config-2", 1);
-        else if (access("/data/data/com.termux/files/usr/share/X11/xkb", F_OK) == 0)
-            setenv("XKB_CONFIG_ROOT", "/data/data/com.termux/files/usr/share/X11/xkb", 1);
-    }
-
-    if (!getenv("XKB_CONFIG_ROOT")) {
-        char* error = (char*) "$XKB_CONFIG_ROOT is not set. Normally it is pointing to /usr/share/X11/xkb of a container.";
-        log(ERROR, "%s", error);
-        dprintf(2, "%s\n", error);
-        return JNI_FALSE;
-    }
-
-    XkbBaseDirectory = getenv("XKB_CONFIG_ROOT");
-    if (access(XkbBaseDirectory, F_OK) != 0) {
-        log(ERROR, "%s is unaccessible: %s\n", XkbBaseDirectory, strerror(errno));
-        printf("%s is unaccessible: %s\n", XkbBaseDirectory, strerror(errno));
-        return JNI_FALSE;
-    }
-
-    env->GetJavaVM(&vm);
-
-    AChoreographer *choreographer = AChoreographer_getInstance();
-    // Trigger it first time
-    AChoreographer_postFrameCallback(choreographer, (AChoreographer_frameCallback) lorieChoreographerFrameCallback, choreographer);
-
+    asprintf(&xtrans_unix_path_x11, "%s/.X11-unix/X", tmp);
+    asprintf(&xtrans_unix_dir_x11, "%s/.X11-unix/", tmp);
+    XkbBaseDirectory = xkb;
+    serverReady = ready;
+    serverContext = context;
     xorg_list_init(&registeredBuffers);
-    pthread_create(&t, nullptr, +[](void* cookie) -> void* {
-        if (((JavaVM*) cookie)->AttachCurrentThread(&serverEnv, nullptr) != JNI_OK)
-            FatalError("Failed to attach the X server thread to the JVM");
-        exit(dix_main(argc, (char**) argv, (char*[]) { nullptr }));
-    }, vm);
-    return JNI_TRUE;
+    pthread_t thread;
+    started = true;
+    int error = pthread_create(&thread, nullptr, +[](void*) -> void* {
+        exit(dix_main(argc, argv, (char*[]) { nullptr }));
+    }, nullptr);
+    if (error) {
+        started = false;
+        for (int i = 0; i < argc; ++i) free(argv[i]);
+        free(argv);
+        free(xtrans_unix_path_x11);
+        free(xtrans_unix_dir_x11);
+        return false;
+    }
+    pthread_detach(thread);
+    AChoreographer* choreographer = AChoreographer_getInstance();
+    AChoreographer_postFrameCallback(choreographer, (AChoreographer_frameCallback)lorieChoreographerFrameCallback, choreographer);
+    return true;
 }
 
 static Bool handleTouchEvent(__unused ClientPtr pClient, void *closure) {
@@ -294,7 +165,6 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
         InputThreadUnregisterDev(fd);
         close(fd);
         conn_fd = -1;
-        lorieEnableClipboardSync(FALSE);
         uint64_t generation = ++dataConnection;
         QueueWorkProc(+[](__unused ClientPtr client, void* closure) -> Bool {
             if (dataConnection.load() == (uint64_t)(uintptr_t)closure) {
@@ -443,9 +313,6 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
                 lorieKeysymKeyboardEvent(ks, FALSE);
                 break;
             }
-            case EVENT_CLIPBOARD_ENABLE:
-                lorieEnableClipboardSync(e.clipboardEnable.enable);
-                break;
             case EVENT_DATA: {
                 struct Command { LorieDataEvent event; int fd; uint64_t generation; };
                 int descriptor = e.data.hasFd ? ancil_recv_fd(fd) : -1;
@@ -467,36 +334,6 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
                     handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr);
                     return;
                 }
-                lorieWakeServer();
-                break;
-            }
-            case EVENT_CLIPBOARD_ANNOUNCE:
-                QueueWorkProc(+[](__unused ClientPtr pClient, __unused void *closure) -> Bool {
-                    // This must be done only on X server thread.
-                    lorieHandleClipboardAnnounce();
-                    return TRUE;
-                }, nullptr, nullptr);
-                lorieWakeServer();
-                break;
-            case EVENT_CLIPBOARD_SEND: {
-                if (e.clipboardSend.count > 1024 * 1024) {
-                    handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr);
-                    return;
-                }
-                char *data = (char*) calloc(1, e.clipboardSend.count + 1);
-                if (!data) { handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
-                size_t received = 0;
-                while (received < e.clipboardSend.count) {
-                    ssize_t count = recv(fd, data + received, e.clipboardSend.count - received, MSG_WAITALL);
-                    if (count < 0 && errno == EINTR) continue;
-                    if (count <= 0) { free(data); handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
-                    received += count;
-                }
-                QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
-                    // This must be done only on X server thread.
-                    lorieHandleClipboardData((const char*) closure);
-                    return TRUE;
-                }, nullptr, data);
                 lorieWakeServer();
                 break;
             }
@@ -569,15 +406,6 @@ static bool sendData(const void* data, size_t size) {
     return false;
 }
 
-void lorieSendClipboardData(const char* data) {
-    if (data && conn_fd != -1) {
-        size_t len = strlen(data);
-        if (len > 1024 * 1024) return;
-        lorieEvent e = { .clipboardSend = { .t = EVENT_CLIPBOARD_SEND, .count = (uint32_t) len } };
-        if (sendData(&e, sizeof(e))) sendData(data, len);
-    }
-}
-
 void lorieSendDataEvent(const LorieDataEvent* data, int descriptor) {
     if (conn_fd < 0) return;
     lorieEvent event{};
@@ -591,13 +419,6 @@ void lorieSendDataEvent(const LorieDataEvent* data, int descriptor) {
 void lorieSendSyncReply(uint32_t serial) {
     if (conn_fd != -1) {
         lorieEvent e = { .sync = { .t = EVENT_SYNC_REPLY, .serial = serial } };
-        write(conn_fd, &e, sizeof(e));
-    }
-}
-
-void lorieRequestClipboard(void) {
-    if (conn_fd != -1) {
-        lorieEvent e = { .type = EVENT_CLIPBOARD_REQUEST };
         write(conn_fd, &e, sizeof(e));
     }
 }
@@ -664,12 +485,10 @@ extern "C" void DDXNotifyFocusChanged(void) {
     }
 }
 
-static jobject getXConnection(JNIEnv *env, __unused jobject cls) {
+int lorieServerConnect(void) {
     int client[2];
-    jclass ParcelFileDescriptorClass = env->FindClass("android/os/ParcelFileDescriptor");
-    jmethodID adoptFd = env->GetStaticMethodID(ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
-    socketpair(AF_UNIX, SOCK_STREAM, 0, client);
-    QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, client)) return -1;
+    if (!QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
         if (conn_fd != -1) {
             InputThreadUnregisterDev(conn_fd);
             close(conn_fd);
@@ -686,115 +505,20 @@ static jobject getXConnection(JNIEnv *env, __unused jobject cls) {
         conn_fd = (int) (int64_t) closure;
         lorieActivityConnected();
         return TRUE;
-    }, nullptr, (void*) (int64_t) client[1]);
+    }, nullptr, (void*) (int64_t) client[1])) { close(client[0]); close(client[1]); return -1; }
     lorieWakeServer();
 
-    return env->CallStaticObjectMethod(ParcelFileDescriptorClass, adoptFd, client[0]);
+    return client[0];
 }
 
-static jobject getLogcatOutput(JNIEnv *env, __unused jobject cls) {
-    jclass ParcelFileDescriptorClass = env->FindClass("android/os/ParcelFileDescriptor");
-    jmethodID adoptFd = env->GetStaticMethodID(ParcelFileDescriptorClass, "adoptFd", "(I)Landroid/os/ParcelFileDescriptor;");
-    const char *debug = getenv("TERMUX_X11_DEBUG");
-    if (debug && !strcmp(debug, "1")) {
-        pthread_t t;
-        int p[2];
-        pipe(p);
-        fchmod(p[1], 0777);
-        pthread_create(&t, nullptr, +[](void *arg) -> void* {
-            char buffer[4096];
-            size_t len;
-            while((len = read((int) (int64_t) arg, buffer, 4096)) >=0)
-                write(2, buffer, len);
-            close((int) (int64_t) arg);
-            return nullptr;
-        }, (void*) (uint64_t) p[0]);
-        return env->CallStaticObjectMethod(ParcelFileDescriptorClass, adoptFd, p[1]);
-    }
-    return nullptr;
-}
+void lorieEmbeddedServerReady(void) { serverReady(serverContext, display); }
 
-void lorieListenForKnocks(void) {
-    if (getenv("MAGICDESK_X11_SESSION")) return;
-    struct sockaddr_in address = { .sin_family = AF_INET, .sin_port = htons(PORT), .sin_addr = { .s_addr = INADDR_ANY } };
-    int fd, reuse = 1;
-
-    // Even in the case if it will fail for some reason everything will work fine
-    // But connection will be delayed a bit
-
-    if ((fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        log(ERROR, "Failed to create the knock-listening socket: %s", strerror(errno));
-        serverEnv->CallVoidMethod(thiz, sendBroadcastDelayed);
-        return;
-    }
-
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse));
-
-    if (bind(fd, (struct sockaddr *) &address, sizeof(address)) < 0) {
-        log(ERROR, "Failed to bind the knock-listening socket to port %d: %s", PORT, strerror(errno));
-        close(fd);
-        serverEnv->CallVoidMethod(thiz, sendBroadcastDelayed);
-        return;
-    }
-
-    if (listen(fd, 5) < 0) {
-        log(ERROR, "Failed to listen on the knock-listening socket: %s", strerror(errno));
-        close(fd);
-        serverEnv->CallVoidMethod(thiz, sendBroadcastDelayed);
-        return;
-    }
-
-    SetNotifyFd(fd, +[](int fd, int ready, __unused void *data) {
-        struct sockaddr_in address;
-        socklen_t addrlen = sizeof(address);
-        uint8_t buffer[512] = {0};
-        int client, count;
-
-        if (ready & X_NOTIFY_ERROR) {
-            RemoveNotifyFd(fd);
-            close(fd);
-            return;
-        }
-
-        if ((client = accept(fd, (struct sockaddr *) &address, &addrlen)) < 0) {
-            log(ERROR, "Failed to accept a connection on the knock-listening socket: %s", strerror(errno));
-            return;
-        }
-
-        if ((count = read(client, buffer, sizeof(buffer))) > 0 && !memcmp(buffer, MAGIC, min(count, sizeof(MAGIC)))) {
-            log(DEBUG, "New client connection!\n");
-            serverEnv->CallVoidMethod(thiz, sendBroadcast);
-        }
-        close(client);
-    }, X_NOTIFY_READ, NULL);
-
-    serverEnv->CallVoidMethod(thiz, sendBroadcastDelayed);
-}
-
-void lorieEmbeddedServerReady(void) {
-    if (getenv("MAGICDESK_X11_SESSION")) serverEnv->CallVoidMethod(thiz, sendBroadcast);
-}
-
-void registerCmdEntryPointNatives(JNIEnv *env) {
-    static JNINativeMethod methods[] = {
-            {"displayName", "()Ljava/lang/String;", (void*)+[](JNIEnv* env, jobject) -> jstring {
-                return env->NewStringUTF(display);
-            }},
-            {"stopServer", "()V", (void*)+[](JNIEnv*, jobject) {
-                QueueWorkProc(+[](__unused ClientPtr, __unused void*) -> Bool {
-                    GiveUp(0);
-                    return TRUE;
-                }, nullptr, nullptr);
-                lorieWakeServer();
-            }},
-            {"start", "([Ljava/lang/String;)Z", (void *) &start},
-            {"getXConnection", "()Landroid/os/ParcelFileDescriptor;", (void *) &getXConnection},
-            {"getLogcatOutput", "()Landroid/os/ParcelFileDescriptor;", (void *) &getLogcatOutput},
-            {"connected", "()Z", (void *) +[]() -> jboolean { return conn_fd != -1; }}, // @CriticalNative
-    };
-    jclass cls = env->FindClass("com/termux/x11/CmdEntryPoint");
-    env->RegisterNatives(cls, methods, sizeof(methods)/sizeof(methods[0]));
+void lorieServerStop(void) {
+    if (!QueueWorkProc(+[](__unused ClientPtr, __unused void*) -> Bool {
+        GiveUp(0);
+        return TRUE;
+    }, nullptr, nullptr)) FatalError("Cannot queue X11 shutdown");
+    lorieWakeServer();
 }
 
 void abort(void) {

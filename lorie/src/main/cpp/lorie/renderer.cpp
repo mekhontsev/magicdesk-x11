@@ -19,7 +19,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <GLES2/gl2ext.h>
-#include <android/native_window_jni.h>
+#include <android/native_window.h>
 #include <android/log.h>
 #include <media/NdkImageReader.h>
 #include <dlfcn.h>
@@ -137,97 +137,30 @@ void Renderer::bindTexture(GLuint id) const {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 }
 
-void Renderer::reportViewport(int dstX, int dstY, int dstW, int dstH, float left, float top, float width, float height) {
-    JNIEnv* env = rendererEnv;
-    if (!env || !thiz || !setRendererViewportMethod)
-        return;
-
-    if (reportedViewportX == dstX && reportedViewportY == dstY &&
-        reportedViewportW == dstW && reportedViewportH == dstH &&
-        reportedSourceLeft == left && reportedSourceTop == top &&
-        reportedSourceWidth == width && reportedSourceHeight == height)
-        return;
-
-    env->CallVoidMethod(thiz, setRendererViewportMethod, dstX, dstY, dstW, dstH, left, top, width, height);
-    if (env->ExceptionCheck()) {
-        env->ExceptionDescribe();
-        env->ExceptionClear();
-    } else {
-        reportedViewportX = dstX;
-        reportedViewportY = dstY;
-        reportedViewportW = dstW;
-        reportedViewportH = dstH;
-        reportedSourceLeft = left;
-        reportedSourceTop = top;
-        reportedSourceWidth = width;
-        reportedSourceHeight = height;
-    }
-}
-
 static const EGLint ctxattribs[] = {
         EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE
 };
 
-// The window the context is kept current on while the real surface is gone. Nothing ever reads
-// from the texture behind it. The renderer owns and releases its reader or Java backing objects.
-//
-// Weird devices without proper EGL_KHR_surfaceless_context support
-// We can not use pbuffer-based surfaces because it will require searching for configs supporting it
-// and I am not sure all devices have configs supporting both pbuffers and regular surfaces simultaneously
-ANativeWindow* Renderer::createDefaultWindow(JNIEnv* env) {
-    if (__builtin_available(android 24, *)) {
-        AImageReader* reader = nullptr;
-        ANativeWindow* win = nullptr;
-        if (AImageReader_new(1, 1, AIMAGE_FORMAT_RGBA_8888, 2, &reader) != AMEDIA_OK) {
-            log("Failed to initialise ImageReader");
-        } else {
-            AImageReader_ImageListener listener = { .context = nullptr, .onImageAvailable = [](void* context, AImageReader* reader) {
-                AImage* image = nullptr;
-                if (AImageReader_acquireLatestImage(reader, &image) == AMEDIA_OK && image)
-                    AImage_delete(image);
-            } };
-            if (AImageReader_setImageListener(reader, &listener) != AMEDIA_OK) {
-                log("Failed to set ImageReader listener");
-                AImageReader_delete(reader);
-            } else if (AImageReader_getWindow(reader, &win) != AMEDIA_OK) {
-                log("Failed to obtain ImageReader native window");
-                AImageReader_delete(reader);
-            }
-        }
-
-        if (win) {
-            defaultReader = reader;
-            ANativeWindow_acquire(win);
-            return win;
-        }
-    }
-
-    jclass surfaceTextureClass = env->FindClass("android/graphics/SurfaceTexture");
-    jclass surfaceClass = env->FindClass("android/view/Surface");
-    if (!surfaceTextureClass || !surfaceClass) {
-        log("Failed to find SurfaceTexture or Surface class");
+// A native ImageReader keeps EGL current while no host surface is attached.
+ANativeWindow* Renderer::createDefaultWindow() {
+    AImageReader* reader = nullptr;
+    ANativeWindow* window = nullptr;
+    if (AImageReader_new(1, 1, AIMAGE_FORMAT_RGBA_8888, 2, &reader) != AMEDIA_OK) return nullptr;
+    AImageReader_ImageListener listener = { .context = nullptr, .onImageAvailable = [](void*, AImageReader* source) {
+        AImage* image = nullptr;
+        if (AImageReader_acquireLatestImage(source, &image) == AMEDIA_OK && image) AImage_delete(image);
+    } };
+    if (AImageReader_setImageListener(reader, &listener) != AMEDIA_OK ||
+            AImageReader_getWindow(reader, &window) != AMEDIA_OK || !window) {
+        AImageReader_delete(reader);
         return nullptr;
     }
-
-    jobject surfaceTexture = env->NewObject(surfaceTextureClass, env->GetMethodID(surfaceTextureClass, "<init>", "(Z)V"), true);
-    jobject surface = surfaceTexture ? env->NewObject(surfaceClass, env->GetMethodID(surfaceClass, "<init>", "(Landroid/graphics/SurfaceTexture;)V"), surfaceTexture) : nullptr;
-    if (!surface) {
-        log("Failed to instantiate SurfaceTexture or Surface");
-        env->ExceptionClear();
-        return nullptr;
-    }
-
-    defaultTexture = env->NewGlobalRef(surfaceTexture);
-    defaultSurface = env->NewGlobalRef(surface);
-    return ANativeWindow_fromSurface(env, surface);
+    defaultReader = reader;
+    ANativeWindow_acquire(window);
+    return window;
 }
 
 void* Renderer::initThread() {
-    if (jvm->AttachCurrentThread(&rendererEnv, nullptr) != JNI_OK) {
-        log("Failed to attach renderer thread to JVM");
-        return nullptr;
-    }
-
     EGLint major, minor;
     EGLint numConfigs;
     EGLint *const alphaAttrib = &configAttribs[11];
@@ -253,7 +186,7 @@ void* Renderer::initThread() {
     if (ctx == EGL_NO_CONTEXT)
         return printEglError("eglCreateContext failed", __LINE__);
 
-    win = defaultWin = createDefaultWindow(rendererEnv);
+    win = defaultWin = createDefaultWindow();
     if (!defaultWin)
         return printEglError("Got no window to keep the context current on", __LINE__);
 
@@ -279,7 +212,6 @@ void* Renderer::initThread() {
     gv_coords_bgra = (GLuint) glGetAttribLocation(g_texture_program_bgra, "texCoords");
 
     glActiveTexture(GL_TEXTURE0);
-    glGenTextures(1, &cursor.id);
 
     pthread_mutex_lock(&stateLock);
     initialized = true;
@@ -288,17 +220,12 @@ void* Renderer::initThread() {
     return nullptr;
 }
 
-bool Renderer::init(JNIEnv* env, jobject view) {
+bool Renderer::init() {
     if (thread)
         return initialized;
 
-    env->GetJavaVM(&jvm);
-    if (view) {
-        thiz = env->NewGlobalRef(view);
-        jclass clazz = env->FindClass("com/termux/x11/LorieView");
-        lorieViewClass = (jclass) env->NewGlobalRef(clazz);
-        setRendererViewportMethod = env->GetMethodID(lorieViewClass, "setRendererViewport", "(IIIIFFFF)V");
-    }
+    debugEnabled = getenv("TERMUX_X11_DEBUG") != nullptr;
+
     xorg_list_init(&addedBuffers);
     xorg_list_init(&buffers);
     xorg_list_init(&removedBuffers);
@@ -362,21 +289,11 @@ void Renderer::destroy() {
     pthread_cond_destroy(&stateChangeFinishCond);
     pthread_mutex_destroy(&stateLock);
     pthread_spin_destroy(&bufferLock);
-    JNIEnv* env = nullptr;
-    if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_OK) {
-        if (thiz) env->DeleteGlobalRef(thiz);
-        if (lorieViewClass) env->DeleteGlobalRef(lorieViewClass);
-    }
-    thiz = nullptr;
-    lorieViewClass = nullptr;
+
 }
 
 int Renderer::getWakeupCondFd() const {
     return stateCondFd;
-}
-
-void Renderer::setFiltering(jint f) {
-    filtering = f;
 }
 
 void Renderer::testCapabilities(int* legacy_drawing, int* gpu_present_disabled) {
@@ -615,151 +532,6 @@ void Renderer::removeAllBuffers() {
     pthread_spin_unlock(&bufferLock);
 }
 
-void Renderer::setWindow(JNIEnv *env, jobject jsfc) {
-    ANativeWindow* newWin = jsfc ? ANativeWindow_fromSurface(env, jsfc) : nullptr;
-    if (newWin)
-        ANativeWindow_acquire(newWin);
-
-    pthread_mutex_lock(&stateLock);
-    if (newWin && pendingWin == newWin) {
-        ANativeWindow_release(newWin);
-        pthread_mutex_unlock(&stateLock);
-        return;
-    }
-
-    if (pendingWin)
-        ANativeWindow_release(pendingWin);
-
-    pendingWin = newWin;
-    expectedW = expectedH = 0;
-    windowChanged = TRUE;
-
-    pthread_cond_signal(stateCond);
-
-    // We should wait until renderer destroys EGLSurface before SurfaceCallback::surfaceDestroyed finishes
-    // Otherwise we will have weird errors like
-    // `freeAllBuffers: 1 buffers were freed while being dequeued!`
-    // or
-    // `query: BufferQueue has been abandoned`
-    while(windowChanged && !stopping)
-        pthread_cond_wait(&stateChangeFinishCond, &stateLock);
-
-    pthread_mutex_unlock(&stateLock);
-}
-
-void Renderer::releaseWinAndSurface(ANativeWindow** anw, EGLSurface *esfc) {
-    if (esfc && *esfc && *esfc != defaultSfc) {
-        // Requeue the dequeued buffer, causes flickering during window reconfiguring
-        eglSwapBuffers(egl_display, *esfc);
-        if (eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx) != EGL_TRUE)
-            return vprintEglError("eglMakeCurrent failed (EGL_NO_SURFACE)", __LINE__);
-        if (eglDestroySurface(egl_display, *esfc) != EGL_TRUE)
-            return vprintEglError("eglDestoySurface failed", __LINE__);
-        *esfc = defaultSfc;
-    }
-
-    if (anw && *anw && *anw != defaultWin) {
-        ANativeWindow_release(*anw);
-        *anw = defaultWin;
-    }
-}
-
-void Renderer::setViewport(int x, int y, int w, int h, int ew, int eh, int hidden) {
-    pthread_mutex_lock(&stateLock);
-    viewportX = x;
-    viewportY = y;
-    viewportW = w;
-    viewportH = h;
-    expectedW = ew;
-    expectedH = eh;
-    hiddenBottom = hidden;
-    viewportChanged = true;
-    reportedViewportX = reportedViewportY = reportedViewportW = reportedViewportH = -1;
-    reportedSourceLeft = reportedSourceTop = reportedSourceWidth = reportedSourceHeight = -1.f;
-    if (state)
-        state->drawRequested = true;
-    pthread_cond_signal(stateCond);
-    pthread_mutex_unlock(&stateLock);
-}
-
-void Renderer::setZoom(int percent) {
-    pthread_mutex_lock(&stateLock);
-    zoomPercent = percent < 100 ? 100 : (percent > 400 ? 400 : percent);
-    reportedViewportX = reportedViewportY = reportedViewportW = reportedViewportH = -1;
-    reportedSourceLeft = reportedSourceTop = reportedSourceWidth = reportedSourceHeight = -1.f;
-    if (state)
-        state->drawRequested = true;
-    pthread_cond_signal(stateCond);
-    pthread_mutex_unlock(&stateLock);
-}
-
-void Renderer::setZoomAnchor(float sourceX, float sourceY, float fracX, float fracY) {
-    pthread_mutex_lock(&stateLock);
-    pinchAnchorSourceX = sourceX;
-    pinchAnchorSourceY = sourceY;
-    pinchAnchorFracX = fracX;
-    pinchAnchorFracY = fracY;
-    if (state)
-        state->drawRequested = true;
-    pthread_cond_signal(stateCond);
-    pthread_mutex_unlock(&stateLock);
-}
-
-void Renderer::clearZoomAnchor() {
-    pthread_mutex_lock(&stateLock);
-    pinchAnchorSourceX = -1.f;
-    if (state)
-        state->drawRequested = true;
-    pthread_cond_signal(stateCond);
-    pthread_mutex_unlock(&stateLock);
-}
-
-void Renderer::refreshContext() {
-    int width = pendingWin ? ANativeWindow_getWidth(pendingWin) : 0;
-    int height = pendingWin ? ANativeWindow_getHeight(pendingWin) : 0;
-    log("rendererSetWindow %p %d %d", pendingWin, width, height);
-
-    releaseWinAndSurface(&win, &sfc);
-
-    if (pendingWin && (width <= 0 || height <= 0)) {
-        log("Xlorie: We've got invalid surface. Probably it became invalid before we started working with it.\n");
-        releaseWinAndSurface(&pendingWin, nullptr);
-    }
-
-    win = pendingWin;
-    pendingWin = nullptr;
-    windowChanged = FALSE;
-
-    if (!win) {
-        win = defaultWin;
-        eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx);
-        if (state)
-            state->surfaceAvailable = false;
-        notifyGpuCopyDone(); // Wake up any GPU copy stuck waiting on a surface we no longer have.
-        return;
-    }
-
-    sfc = eglCreateWindowSurface(egl_display, cfg, win, nullptr);
-    if (sfc == EGL_NO_SURFACE)
-        return vprintEglError("eglCreateWindowSurface failed", __LINE__);
-
-    if (eglMakeCurrent(egl_display, sfc, sfc, ctx) != EGL_TRUE) {
-        if (state)
-            state->surfaceAvailable = false;
-        notifyGpuCopyDone();
-        return vprintEglError("eglMakeCurrent failed", __LINE__);
-    }
-
-    eglSwapInterval(egl_display, 0);
-
-    // We should redraw image at least once right after surface change
-    if (state)
-        state->surfaceAvailable = state->drawRequested = state->cursor.updated = win != defaultWin;
-
-    glViewport(0, 0, ANativeWindow_getWidth(win), ANativeWindow_getHeight(win));
-    log("Xlorie: new surface applied: %p\n", sfc);
-}
-
 // Drains the deferred GPU copy queue (filled by present_execute_copy) into the root texture via
 // an FBO. Assumes the caller holds state->lock and will flush/fence before unlocking - returns
 // the highest drained serial WITHOUT publishing it to completedSerial, since the caller must only
@@ -833,7 +605,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
                 // Diagnostic: GLES2 has no glGetTexLevelParameteriv, so ask the AHardwareBuffer
                 // itself what it was actually allocated as, instead of trusting our own desc.
                 {
-                    if (lorieDebugEnabled && (dstSizeLogCount++ & 15) == 0 && dstDesc->buffer) {
+                    if (debugEnabled && (dstSizeLogCount++ & 15) == 0 && dstDesc->buffer) {
                         AHardwareBuffer_Desc realDstDesc;
                         AHardwareBuffer_describe(dstDesc->buffer, &realDstDesc);
                         loge("gpucopy dst texId=%u real AHB size %ux%u stride=%u vs LorieBuffer desc %dx%d\n",
@@ -845,7 +617,7 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
 
             LorieBuffer_bindTexture(src);
             {
-                if (lorieDebugEnabled && (srcSizeLogCount++ & 15) == 0 && srcDesc->buffer) {
+                if (debugEnabled && (srcSizeLogCount++ & 15) == 0 && srcDesc->buffer) {
                     AHardwareBuffer_Desc realSrcDesc;
                     AHardwareBuffer_describe(srcDesc->buffer, &realSrcDesc);
                     loge("gpucopy src texId=%u real AHB size %ux%u stride=%u vs LorieBuffer desc %dx%d (stride=%d)\n",
@@ -909,234 +681,19 @@ void Renderer::applyPendingGpuCopies() {
     lorie_mutex_unlock(&state->lock, &state->lockingPid);
 }
 
-// Keeps the shown region still while the cursor stays inside it, panning only when the cursor
-// enters the 5% band near an edge.
-static float panToCursor(float offset, float cursor, float shown, float total) {
-    float edge = shown * 0.05f;
-    if (cursor < offset + edge)
-        offset = cursor - edge;
-    else if (cursor > offset + shown - edge)
-        offset = cursor - shown + edge;
-    return fmaxf(0.f, fminf(offset, total - shown));
-}
-
-void Renderer::redrawLocked(bool* waitingForBuffers) {
-    float xfactor = 1.f;
-    const LorieBuffer_Desc *desc = nullptr;
-    EGLSync fence;
-
-    // Early returns below skip the applyPendingGpuCopiesLocked() call further down, which would
-    // stall copies queued for windows unrelated to root while root itself isn't ready yet.
-    if (state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex)
-        applyPendingGpuCopies();
-
-    // The buffer will not be released until this function ends, but main thread can modify buffer list
+bool Renderer::shouldWait() {
     pthread_spin_lock(&bufferLock);
-    LorieBuffer *buffer = LorieBufferList_findById(&buffers, state->rootWindowTextureID);
-    // Probably X server requested us to draw removed buffer and immediately requested to remove it. Let's display it one last time.
-    if (!buffer)
-        buffer = LorieBufferList_findById(&removedBuffers, state->rootWindowTextureID);
-    if (!buffer)
-        *waitingForBuffers = true;
+    bool buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
     pthread_spin_unlock(&bufferLock);
-    if (!buffer) {
-        log("Buffer %llu not found", state->rootWindowTextureID);
-        return;
-    }
-
-    desc = LorieBuffer_description(buffer);
-
-    int alignedExpectedW = expectedW - (expectedW % CVT_H_GRANULARITY);
-
-    if (!expectedW || !expectedH || desc->height != expectedH ||
-        (desc->width != alignedExpectedW && desc->width != expectedW)) {
-        log("Buffer %llu is not of expected size, expecting %dx%d or %dx%d, got %dx%d",
-            state->rootWindowTextureID, alignedExpectedW, expectedH, expectedW, expectedH,
-            desc->width, desc->height);
-        // Otherwise rendererShouldWait sees drawRequested or a pending cursor update and busy-spins
-        // retrying this same mismatch instead of waiting for the buffer of the requested size.
-        state->drawRequested = FALSE;
-        *waitingForBuffers = true;
-        return;
-    }
-
-    int surfaceH = ANativeWindow_getHeight(win);
-    int surfaceW = ANativeWindow_getWidth(win);
-    int renderViewportX = viewportX, renderViewportY = viewportY, renderViewportW = viewportW, renderViewportH = viewportH;
-    float destinationScaleX = 1.f, destinationScaleY = 1.f;
-    if (zoomPercent > 100 && viewportW > 0 && viewportH > 0) {
-        float requestedScale = (float) zoomPercent / 100.f;
-        float centerX = (float) viewportX + (float) viewportW / 2.f;
-        float centerY = (float) viewportY + (float) viewportH / 2.f;
-        float maxW = 2.f * fminf(centerX, (float) surfaceW - centerX);
-        float maxH = 2.f * fminf(centerY, (float) surfaceH - centerY);
-        destinationScaleX = fminf(requestedScale, maxW / (float) viewportW);
-        destinationScaleY = fminf(requestedScale, maxH / (float) viewportH);
-        if (destinationScaleX < 1.f)
-            destinationScaleX = 1.f;
-        if (destinationScaleY < 1.f)
-            destinationScaleY = 1.f;
-
-        renderViewportW = (int) lroundf((float) viewportW * destinationScaleX);
-        renderViewportH = (int) lroundf((float) viewportH * destinationScaleY);
-        renderViewportX = (int) lroundf(centerX - (float) renderViewportW / 2.f);
-        renderViewportY = (int) lroundf(centerY - (float) renderViewportH / 2.f);
-    }
-
-    auto sourceWidth = (float) desc->width, sourceHeight = (float) desc->height;
-    auto logicalSourceWidth = (float) expectedW, logicalSourceHeight = (float) expectedH;
-    if (zoomPercent > 100) {
-        float requestedScale = (float) zoomPercent / 100.f;
-        sourceWidth = (float) expectedW * destinationScaleX / requestedScale;
-        sourceHeight = (float) expectedH * destinationScaleY / requestedScale;
-        logicalSourceWidth = sourceWidth;
-        logicalSourceHeight = sourceHeight;
-    }
-
-    // The soft keyboard hides the bottom of the picture instead of the picture shrinking for it,
-    // so only the part fitting above it is drawn, at the same scale as the whole picture.
-    int cut = renderViewportY + renderViewportH - (viewportY + viewportH - hiddenBottom);
-    bool bottomHidden = hiddenBottom > 0 && cut > 0 && cut < renderViewportH;
-    if (bottomHidden) {
-        float shown = (float) (renderViewportH - cut) / (float) renderViewportH;
-        sourceHeight *= shown;
-        logicalSourceHeight *= shown;
-        renderViewportH -= cut;
-    }
-
-    // The keyboard swaps the zone the picture is at for the one it was left at on the other side of
-    // the switch. Zoomed in the picture pans on its own while the keyboard is away, so there it is
-    // only put back once the keyboard is gone, to where it was before the keyboard covered it.
-    if (bottomHidden != bottomWasHidden) {
-        bottomWasHidden = bottomHidden;
-        float other = hiddenPanSourceTop;
-        hiddenPanSourceTop = panSourceTop;
-        if (other >= 0.f && (!bottomHidden || zoomPercent == 100))
-            panSourceTop = other;
-    }
-
-    auto cursorX = (float) state->cursor.x, cursorY = (float) state->cursor.y; // snapshot, cursor.x/y is updated lock-free
-
-    if (pinchAnchorSourceX >= 0.f) {
-        panSourceLeft = fmaxf(0.f, fminf(pinchAnchorSourceX - pinchAnchorFracX * sourceWidth, (float) expectedW - sourceWidth));
-        panSourceTop = fmaxf(0.f, fminf(pinchAnchorSourceY - pinchAnchorFracY * sourceHeight, (float) expectedH - sourceHeight));
-    } else {
-        // The buffer can be a few pixels narrower than the screen because of the mode granularity,
-        // so panning horizontally only makes sense when zoomed in.
-        panSourceLeft = zoomPercent > 100
-                        ? panToCursor(panSourceLeft, cursorX, sourceWidth, (float) expectedW) : 0.f;
-        panSourceTop = sourceHeight < (float) expectedH
-                       ? panToCursor(panSourceTop, cursorY, sourceHeight, (float) expectedH) : 0.f;
-    }
-    float sourceLeft = panSourceLeft, sourceTop = panSourceTop;
-
-    glDisable(GL_SCISSOR_TEST);
-    glViewport(0, 0, surfaceW, surfaceH);
-    glClearColor(0.f, 0.f, 0.f, 1.f);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glViewport(renderViewportX, surfaceH - renderViewportY - renderViewportH, renderViewportW, renderViewportH);
-
-    reportViewport(renderViewportX, renderViewportY, renderViewportW, renderViewportH,
-                   sourceLeft, sourceTop, logicalSourceWidth, logicalSourceHeight);
-
-    // We should signal X server to not use root window while we actively copy it
-    lorie_mutex_lock(&state->lock, &state->lockingPid);
-    // Share this draw's flush+fence below instead of a separate round trip per frame.
-    uint64_t gpuCopySerial = applyPendingGpuCopiesLocked();
-    state->drawRequested = FALSE;
-
-    LorieBuffer_bindTexture(buffer);
-    if (desc->type == LORIEBUFFER_FD)
-        xfactor = (float) desc->width/(float) desc->stride;
-    drawRegion(0, -1.f, -1.f, 1.f, 1.f,
-               sourceLeft / (float) desc->width * xfactor, sourceTop / (float) desc->height,
-               (sourceLeft + sourceWidth) / (float) desc->width * xfactor,
-               (sourceTop + sourceHeight) / (float) desc->height,
-               LorieBuffer_isRgba(buffer));
-    fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
-    glFlush();
-
-    if (state->cursor.updated) {
-        log("Xlorie: updating cursor\n");
-        lorie_mutex_lock(&state->cursor.lock, &state->cursor.lockingPid);
-        state->cursor.updated = false;
-        bindTexture(cursor.id);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, (GLsizei) state->cursor.width, (GLsizei) state->cursor.height, 0, GL_RGBA, GL_UNSIGNED_BYTE, state->cursor.bits);
-        lorie_mutex_unlock(&state->cursor.lock, &state->cursor.lockingPid);
-    }
-
-    state->cursor.moved = FALSE;
-    drawCursor(sourceWidth, sourceHeight, sourceLeft, sourceTop, cursorX, cursorY);
-    glFlush();
-
-    // Wait until root window drawing is finished before giving control back to X server
-    eglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER);
-    eglDestroySyncKHR(egl_display, fence);
-    if (gpuCopySerial) {
-        __atomic_store_n(&state->gpuCopyQueue.completedSerial, gpuCopySerial, __ATOMIC_RELEASE);
-        notifyGpuCopyDone();
-    }
-    state->waitForNextFrame = true;
-    lorie_mutex_unlock(&state->lock, &state->lockingPid);
-
-    if (eglSwapBuffers(egl_display, sfc) != EGL_TRUE)
-        printEglError("Failed to swap buffers", __LINE__);
-
-    // Perform a little drawing operation to make sure the next buffer is ready on the next invocation of drawing
-    glEnable(GL_SCISSOR_TEST);
-    glScissor(0, 0, 1, 1);
-    glClearColor(0, 0, 0, 0);
-    glClear(GL_COLOR_BUFFER_BIT);
-    glDisable(GL_SCISSOR_TEST);
-    fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
-    eglClientWaitSyncKHR(egl_display, fence, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, EGL_FOREVER);
-    eglDestroySyncKHR(egl_display, fence);
-
-    state->renderedFrames++;
-}
-
-bool Renderer::shouldWait(bool *waitingForBuffers) {
-    bool buffersChanged, gpuCopyPending;
-    if (viewportChanged) {
-        // setWindow drops the expected size, so the buffer rejected right after it fits again
-        // as soon as the viewport is reapplied, and no new buffer is going to arrive.
-        viewportChanged = false;
-        *waitingForBuffers = false;
-    }
-    pthread_spin_lock(&bufferLock);
-    buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
-    pthread_spin_unlock(&bufferLock);
-    gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
-    if (stateChanged || windowChanged || buffersChanged || gpuCopyPending || outputSurfacesChanged())
-        // If there are pending changes we should process them immediately.
-        return false;
-
-    if (outputMode)
-        return !state || state->waitForNextFrame || !outputsNeedDraw();
-
-    if (state) {
-        if (lastRequestedBufferId != state->rootWindowTextureID)
-            *waitingForBuffers = false;
-        lastRequestedBufferId = state->rootWindowTextureID;
-    }
-
-    if (!state || !state->surfaceAvailable || state->waitForNextFrame || *waitingForBuffers)
-        // Even in the case if there are pending changes, we can not draw it without rendering surface
-        return true;
-
-    if (state->drawRequested || state->cursor.moved || state->cursor.updated)
-        // X server reported drawing or cursor changes, no need to wait.
-        return false;
-
-    // Probably spurious wake, no changes we can work with.
-    return true;
+    bool gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
+    if (stateChanged || buffersChanged || gpuCopyPending || outputSurfacesChanged()) return false;
+    return !state || state->waitForNextFrame || !outputsNeedDraw();
 }
 
 void Renderer::threadLoop() {
     LorieBuffer* buf;
-    bool waitingForBuffers = false;
     while (!stopping) {
-        while (!stopping && shouldWait(&waitingForBuffers))
+        while (!stopping && shouldWait())
             pthread_cond_wait(stateCond, &stateLock);
         if (stopping)
             break;
@@ -1151,31 +708,20 @@ void Renderer::threadLoop() {
             state = pendingState;
             pendingState = nullptr;
             stateChanged = false;
-            waitingForBuffers = false;
 
-            if (state)
-                state->surfaceAvailable = outputMode ? hasOutputSurface() : win != defaultWin;
-            else if (win != defaultWin) {
-                glClearColor(0, 0, 0, 0);
-                glClear(GL_COLOR_BUFFER_BIT);
-                eglSwapBuffers(egl_display, sfc);
-            }
+            if (state) state->surfaceAvailable = hasOutputSurface();
 
             if (oldState)
                 munmap(oldState, sizeof(*oldState));
         }
 
-        if (windowChanged)
-            refreshContext();
-        if (outputMode)
-            refreshOutputSurfaces();
+        refreshOutputSurfaces();
 
         // Attach all pending buffers to GL.
         pthread_spin_lock(&bufferLock);
         while((buf = LorieBufferList_first(&addedBuffers))) {
             LorieBuffer_attachToGL(buf);
             LorieBuffer_addToList(buf, &buffers);
-            waitingForBuffers = false;
             invalidateOutputs();
         }
         pthread_spin_unlock(&bufferLock);
@@ -1183,16 +729,7 @@ void Renderer::threadLoop() {
         pthread_cond_signal(&stateChangeFinishCond);
         pthread_mutex_unlock(&stateLock);
 
-        // Prefer a full redraw over the standalone apply below so a pending GPU copy shares one
-        // lock+fence with the root/cursor draw, instead of two GPU round trips per frame.
-        bool gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
-        if (outputMode && state)
-            drawOutputs();
-        else if (state && state->surfaceAvailable && !state->waitForNextFrame &&
-            (state->drawRequested || state->cursor.moved || state->cursor.updated || gpuCopyPending))
-            redrawLocked(&waitingForBuffers);
-        else if (gpuCopyPending)
-            applyPendingGpuCopies();
+        if (state) drawOutputs();
 
         pthread_spin_lock(&bufferLock);
         // Remove all buffers which were attached to GL.
@@ -1221,25 +758,15 @@ void Renderer::releaseGraphics() {
 
     glDeleteProgram(g_texture_program);
     glDeleteProgram(g_texture_program_bgra);
-    glDeleteTextures(1, &cursor.id);
     eglMakeCurrent(egl_display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-    if (sfc != defaultSfc) // defensive; setWindow(nullptr) already reverts this before onDetachedFromWindow runs
-        eglDestroySurface(egl_display, sfc);
     eglDestroySurface(egl_display, defaultSfc);
     eglDestroyContext(egl_display, ctx);
     // Intentionally not calling eglTerminate(egl_display): the EGLDisplay is a process-wide
     // driver connection, not a per-instance resource.
     if (defaultWin) ANativeWindow_release(defaultWin);
     if (defaultReader) AImageReader_delete(defaultReader);
-    if (rendererEnv) {
-        if (defaultTexture) rendererEnv->DeleteGlobalRef(defaultTexture);
-        if (defaultSurface) rendererEnv->DeleteGlobalRef(defaultSurface);
-        jvm->DetachCurrentThread();
-    }
     defaultWin = win = nullptr;
     defaultReader = nullptr;
-    defaultTexture = defaultSurface = nullptr;
-    rendererEnv = nullptr;
     sfc = defaultSfc = EGL_NO_SURFACE;
     ctx = EGL_NO_CONTEXT;
 }
@@ -1320,20 +847,4 @@ void Renderer::drawRegion(GLuint id, float x0, float y0, float x1, float y1, flo
     glEnableVertexAttribArray(p);
     glEnableVertexAttribArray(c);
     glDrawArrays(GL_TRIANGLE_STRIP, 0, 4); checkGlError();
-}
-
-void Renderer::drawCursor(float displayWidth, float displayHeight, float sourceLeft, float sourceTop, float cursorX, float cursorY) {
-    float x, y, w, h;
-
-    if (!state->cursor.width || !state->cursor.height || !state->cursor.visible)
-        return;
-
-    x = 2.f * (cursorX - sourceLeft - (float) state->cursor.xhot) / displayWidth - 1.f;
-    y = 2.f * (cursorY - sourceTop - (float) state->cursor.yhot) / displayHeight - 1.f;
-    w = 2.f * (float) state->cursor.width / displayWidth;
-    h = 2.f * (float) state->cursor.height / displayHeight;
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    drawRegion(cursor.id, x, y, x + w, y + h, 0.f, 0.f, 1.f, 1.f, false);
-    glDisable(GL_BLEND);
 }

@@ -570,7 +570,6 @@ void lorieDataCommand(const LorieDataEvent* event, int fd) {
     if (event->operation == LORIE_DATA_ENABLE) {
         enabled = TRUE;
         clipboardActive = event->x != 0;
-        lorieEnableClipboardSync(FALSE);
         if (!bridge) bridge = newWindow();
         goto done;
     }

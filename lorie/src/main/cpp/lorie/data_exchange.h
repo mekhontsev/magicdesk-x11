@@ -1,15 +1,10 @@
 #pragma once
 #include <stdint.h>
+#include "embedded.h"
 struct _Window;
 
 /* Embedded content protocol. Payload descriptors contain bytes, never pointers or paths.
  * CLIPBOARD and XDND share selection conversion, but have independent ownership. */
-enum {
-    LORIE_DATA_ENABLE = 1, LORIE_DATA_OFFER, LORIE_DATA_READ, LORIE_DATA_REQUEST,
-    LORIE_DATA_REPLY, LORIE_DATA_ENTER, LORIE_DATA_MOVE, LORIE_DATA_LEAVE,
-    LORIE_DATA_DROP, LORIE_DATA_STATUS, LORIE_DATA_FINISH, LORIE_DATA_CANCEL, LORIE_DATA_BEGIN
-};
-enum { LORIE_DATA_CLIPBOARD, LORIE_DATA_DRAG };
 #define LORIE_DATA_MAX_BYTES (128U * 1024U * 1024U)
 #define LORIE_DATA_MAX_TARGETS 64
 #define LORIE_DATA_CHUNK 65536

@@ -1,0 +1,61 @@
+name: Native X11
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+        abi: [arm64-v8a, x86_64]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - uses: android-actions/setup-android@v3
+      - name: Android toolchain
+        shell: bash
+        run: sdkmanager "ndk;27.3.13750724" "cmake;3.22.1"
+      - uses: msys2/setup-msys2@v2
+        if: runner.os == 'Windows'
+        with:
+          msystem: UCRT64
+          install: bison patch mingw-w64-ucrt-x86_64-gcc
+      - name: Windows host tools
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          cygpath -w /ucrt64/bin >> "$GITHUB_PATH"
+          cygpath -w /usr/bin >> "$GITHUB_PATH"
+      - name: Linux host tools and regressions
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison ninja-build patch clang
+          sh scripts/verify-native.sh
+      - name: Corresponding source
+        shell: bash
+        run: git ls-files --recurse-submodules -z | tar --null --verbatim-files-from --files-from=- -czf MagicDesk-X11-source.tar.gz
+      - name: Link native contract
+        shell: bash
+        run: |
+          cmake -S lorie/src/main/cpp -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_HOME/ndk/27.3.13750724/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=${{ matrix.abi }} -DANDROID_PLATFORM=android-34 -DLORIE_BUILD_SMOKE=ON
+          cmake --build build --target lorie-smoke --parallel 4
+      - uses: actions/upload-artifact@v7
+        with:
+          name: native-contract-${{ matrix.os }}-${{ matrix.abi }}
+          path: |
+            build/lorie-smoke
+            MagicDesk-X11-source.tar.gz

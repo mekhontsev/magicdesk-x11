@@ -1083,8 +1083,7 @@ static void lorieSetScrollLockIndicator(DeviceIntPtr dev, Bool on) {
  * e.g. right after regaining focus, when the state may have changed while backgrounded
  * and unseen by us. Changes server state directly instead of emulating key presses.
  *
- * `state` bits must match InputEventSender.syncLockKeysState() on the Java side:
- * bit0 = Caps Lock, bit1 = Num Lock, bit2 = Scroll Lock.
+ * Protocol bits: bit0 = Caps Lock, bit1 = Num Lock, bit2 = Scroll Lock.
  */
 void lorieSyncLockKeysState(uint8_t state) {
 	DeviceIntPtr master = GetMaster(lorieKeyboard, KEYBOARD_OR_FLOAT);

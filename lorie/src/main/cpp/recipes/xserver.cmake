@@ -284,12 +284,11 @@ foreach (part glx glxvnd fb mi dix composite damageext dbe randr miext_damage re
     set(XSERVER_LIBS ${XSERVER_LIBS} xserver_${part})
 endforeach ()
 
-add_library(Xlorie SHARED
+add_library(LorieNative STATIC
         "xserver/mi/miinitext.c"
         "xserver/hw/xquartz/keysym2ucs.c"
         "libxcvt/lib/libxcvt.c"
         "lorie/shm/shmem.c"
-        "lorie/clipboard.c"
         "lorie/data_exchange.c"
         "lorie/InitOutput.c"
         "lorie/InitInput.c"
@@ -302,19 +301,17 @@ add_library(Xlorie SHARED
         "lorie/session.cpp"
         "lorie/buffer.c"
         "lorie/dma_copy.c"
-        "lorie/activity.cpp"
         "lorie/cmdentrypoint.cpp"
         "lorie/workqueue.cpp")
-target_include_directories(Xlorie PRIVATE ${inc} "libxcvt/include")
-# -nostdlib++ keeps this shared object free of any libc++ dependency; renderer.cpp, activity.cpp,
-# and cmdentrypoint.cpp are restricted to a runtime-free subset of C++ (no exceptions, no RTTI, no
-# STL) to make that possible.
-target_link_options(Xlorie PRIVATE "-Wl,--as-needed" "-Wl,--no-undefined" "-fvisibility=hidden" "-nostdlib++")
-target_link_libraries(Xlorie "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android mediandk log m ${LORIE_ZLIB} ${LORIE_EGL} ${LORIE_GLES})
+target_include_directories(LorieNative PRIVATE ${inc} "libxcvt/include")
+# The host supplies JNI. Keep this engine usable without a Java class or VM.
+target_include_directories(LorieNative PUBLIC "lorie")
+target_link_options(LorieNative INTERFACE -Wl,--gc-sections)
+target_link_libraries(LorieNative PUBLIC "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android mediandk log m ${LORIE_ZLIB} ${LORIE_EGL} ${LORIE_GLES})
 if (DEFINED LORIE_ANDROID_LIBDIR)
-    target_compile_definitions(Xlorie PRIVATE EGL_NO_PLATFORM_SPECIFIC_TYPES)
+    target_compile_definitions(LorieNative PRIVATE EGL_NO_PLATFORM_SPECIFIC_TYPES)
     set_source_files_properties("lorie/dma_copy.c" PROPERTIES COMPILE_OPTIONS "--target=aarch64-linux-android34")
 endif()
-target_compile_options(Xlorie PRIVATE ${compile_options} "$<$<COMPILE_LANGUAGE:C>:${c_only_compile_options}>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
-target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")
-target_apply_patch(Xlorie "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy" "${CMAKE_CURRENT_SOURCE_DIR}/patches/libepoxy.patch")
+target_compile_options(LorieNative PRIVATE ${compile_options} "$<$<COMPILE_LANGUAGE:C>:${c_only_compile_options}>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
+target_apply_patch(LorieNative "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")
+target_apply_patch(LorieNative "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy" "${CMAKE_CURRENT_SOURCE_DIR}/patches/libepoxy.patch")

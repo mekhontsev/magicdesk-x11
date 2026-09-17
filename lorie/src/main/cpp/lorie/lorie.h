@@ -3,14 +3,13 @@
 #include <unistd.h>
 
 #include <android/hardware_buffer.h>
-#include <android/native_window_jni.h>
+#include <android/native_window.h>
 #include <android/choreographer.h>
 #include <android/log.h>
 
 #include <stdbool.h>
 #include <X11/Xdefs.h>
 #include <X11/keysymdef.h>
-#include <jni.h>
 #include <screenint.h>
 #include <errno.h>
 #include <sys/socket.h>
@@ -18,8 +17,6 @@
 #include "buffer.h"
 #include "data_exchange.h"
 
-#define PORT 7892
-#define MAGIC "0xDEADBEEF"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,12 +25,6 @@ extern "C" {
 struct lorie_shared_server_state;
 
 void lorieConfigureNotify(int width, int height, int framerate, size_t name_size, char* name);
-void lorieEnableClipboardSync(Bool enable);
-void lorieSendClipboardData(const char* data);
-void lorieInitClipboard(void);
-void lorieRequestClipboard(void);
-void lorieHandleClipboardAnnounce(void);
-void lorieHandleClipboardData(const char* data);
 void lorieSetStylusEnabled(Bool enabled);
 void lorieSyncLockKeysState(uint8_t state);
 void lorieWakeServer(void);
@@ -44,13 +35,10 @@ void lorieSendSharedServerState(int memfd);
 void lorieRegisterBuffer(LorieBuffer* buffer);
 void lorieUnregisterBuffer(LorieBuffer* buffer);
 bool lorieConnectionAlive(void);
-extern bool lorieDebugEnabled; // Set in activity.cpp's startLogcat, only called when TERMUX_X11_DEBUG=1.
 void lorieSetRendererWakeupCond(int fd);
 void lorieSetGpuDoneFd(int fd);
 void lorieSetCursorVisible(Bool visible);
 void lorieSendSyncReply(uint32_t serial);
-void registerCmdEntryPointNatives(JNIEnv *env);
-void lorieListenForKnocks(void);
 
 __unused void rendererTestCapabilities(int* legacy_drawing, int* gpu_present_disabled);
 
@@ -210,9 +198,6 @@ typedef union {
 
 #define LORIE_MAX_FAMILY_LAYERS 256
 
-enum { LORIE_OUTPUT_BIND, LORIE_OUTPUT_RESIZE, LORIE_OUTPUT_POINTER,
-    LORIE_OUTPUT_KEY, LORIE_OUTPUT_RELEASE, LORIE_OUTPUT_FOCUS, LORIE_OUTPUT_TEXT,
-    LORIE_OUTPUT_OBSERVE, LORIE_OUTPUT_CLOSE, LORIE_OUTPUT_DPI };
 void lorieDensityInit(void);
 void lorieDensityReset(void);
 void lorieSetDpi(int dpi);
@@ -328,8 +313,7 @@ struct Renderer {
         uint64_t drawnRevision = 0;
     };
     Output* outputs = nullptr;
-    bool outputMode = false;
-    bool setOutputSurface(JNIEnv* env, uint32_t id, jobject surface, bool release);
+    bool setOutputSurface(uint32_t id, ANativeWindow* window, bool release);
     void setOutputFrame(const lorieEvent& event);
     bool outputSurfacesChanged() const;
     bool hasOutputSurface() const;
@@ -343,32 +327,14 @@ struct Renderer {
     EGLConfig cfg = nullptr;
     ANativeWindow *defaultWin = nullptr, *win = nullptr;
     AImageReader* defaultReader = nullptr;
-    jobject defaultTexture = nullptr, defaultSurface = nullptr;
     struct xorg_list addedBuffers{}, buffers{}, removedBuffers{};
-    volatile jint filtering = GL_NEAREST;
+    volatile int filtering = GL_NEAREST;
 
     pthread_t thread = 0;
     bool initialized = false;
     volatile bool stopping = false;
-    volatile bool stateChanged = false, windowChanged = false, viewportChanged = false;
+    volatile bool stateChanged = false;
     struct lorie_shared_server_state* pendingState = nullptr;
-    ANativeWindow* pendingWin = nullptr;
-    volatile int viewportX = 0, viewportY = 0, viewportW = 0, viewportH = 0, expectedW = 0, expectedH = 0;
-    volatile int hiddenBottom = 0;
-    volatile int zoomPercent = 100;
-    // Source point a pinch wants kept at a given viewport fraction. Negative sourceX = no pinch.
-    volatile float pinchAnchorSourceX = -1.f, pinchAnchorSourceY = -1.f;
-    volatile float pinchAnchorFracX = 0.5f, pinchAnchorFracY = 0.5f;
-    float panSourceLeft = 0.f, panSourceTop = 0.f;
-    float hiddenPanSourceTop = -1.f; // the vertical pan of the other keyboard state, negative until there was one
-    bool bottomWasHidden = false;
-    JNIEnv* rendererEnv = nullptr;
-    JavaVM* jvm = nullptr; // Stashed by init() so initThread() can be reached via `this` from a plain (non-capturing) pthread_create callback.
-    jclass lorieViewClass = nullptr;
-    jobject thiz = nullptr; // global ref to the owning LorieView
-    jmethodID setRendererViewportMethod = nullptr;
-    int reportedViewportX = -1, reportedViewportY = -1, reportedViewportW = -1, reportedViewportH = -1;
-    float reportedSourceLeft = -1.f, reportedSourceTop = -1.f, reportedSourceWidth = -1.f, reportedSourceHeight = -1.f;
 
     pthread_mutex_t stateLock{};
     // Shared with the X server so it can signal us directly. Only this thread ever waits on it, so stateLock
@@ -378,11 +344,6 @@ struct Renderer {
     pthread_spinlock_t bufferLock{};
     int stateCondFd = -1;
     struct lorie_shared_server_state* state = nullptr;
-    struct {
-        GLuint id;
-        bool cursorChanged;
-    } cursor{};
-
     // FBO used to blit deferred Present "copy" entries (see lorieTryScheduleGpuCopy) into the root texture.
     GLuint gpuCopyFbo = 0;
 
@@ -399,195 +360,28 @@ struct Renderer {
         EGL_NONE
     };
 
-    // Formerly function-local statics; moved here for the same reason as everything else above -
-    // they are per-instance state, not per-process.
-    uint64_t dstSizeLogCount = 0, srcSizeLogCount = 0;
-    uint64_t lastRequestedBufferId = 0;
-
     int gpuDoneFd = -1;
+    bool debugEnabled = false;
+    uint64_t dstSizeLogCount = 0, srcSizeLogCount = 0;
 
-    bool init(JNIEnv* env, jobject thiz);
+    bool init();
     void destroy();
     void* initThread();
-    ANativeWindow* createDefaultWindow(JNIEnv* env);
+    ANativeWindow* createDefaultWindow();
     void releaseGraphics();
     int getWakeupCondFd() const;
-    void setFiltering(jint f);
     void testCapabilities(int* legacy_drawing, int* gpu_present_disabled);
     void setSharedState(struct lorie_shared_server_state* newState);
     void addBuffer(LorieBuffer* buf);
     void removeBuffer(uint64_t id);
     void removeAllBuffers();
-    void setWindow(JNIEnv* env, jobject jsfc);
-    void setViewport(int x, int y, int w, int h, int ew, int eh, int hidden);
-    void setZoom(int percent);
-    void setZoomAnchor(float sourceX, float sourceY, float fracX, float fracY);
-    void clearZoomAnchor();
-    void releaseWinAndSurface(ANativeWindow** anw, EGLSurface* esfc);
-    void refreshContext();
     LorieBuffer* findBufferWithRetry(uint64_t id);
     uint64_t applyPendingGpuCopiesLocked();
     void applyPendingGpuCopies();
-    void redrawLocked(bool* waitingForBuffers);
-    bool shouldWait(bool* waitingForBuffers);
+    bool shouldWait();
     void threadLoop();
     void bindTexture(GLuint id) const;
     void notifyGpuCopyDone() const;
-    void reportViewport(int dstX, int dstY, int dstW, int dstH, float left, float top, float width, float height);
     void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip);
-    void drawCursor(float displayWidth, float displayHeight, float sourceLeft, float sourceTop, float cursorX, float cursorY);
 };
-#endif
-
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-static int android_to_linux_keycode[304] = {
-        [ 4   /* ANDROID_KEYCODE_BACK */] = KEY_ESC,
-        [ 7   /* ANDROID_KEYCODE_0 */] = KEY_0,
-        [ 8   /* ANDROID_KEYCODE_1 */] = KEY_1,
-        [ 9   /* ANDROID_KEYCODE_2 */] = KEY_2,
-        [ 10  /* ANDROID_KEYCODE_3 */] = KEY_3,
-        [ 11  /* ANDROID_KEYCODE_4 */] = KEY_4,
-        [ 12  /* ANDROID_KEYCODE_5 */] = KEY_5,
-        [ 13  /* ANDROID_KEYCODE_6 */] = KEY_6,
-        [ 14  /* ANDROID_KEYCODE_7 */] = KEY_7,
-        [ 15  /* ANDROID_KEYCODE_8 */] = KEY_8,
-        [ 16  /* ANDROID_KEYCODE_9 */] = KEY_9,
-        [ 17  /* ANDROID_KEYCODE_STAR */] = KEY_KPASTERISK,
-        [ 19  /* ANDROID_KEYCODE_DPAD_UP */] = KEY_UP,
-        [ 20  /* ANDROID_KEYCODE_DPAD_DOWN */] = KEY_DOWN,
-        [ 21  /* ANDROID_KEYCODE_DPAD_LEFT */] = KEY_LEFT,
-        [ 22  /* ANDROID_KEYCODE_DPAD_RIGHT */] = KEY_RIGHT,
-        [ 23  /* ANDROID_KEYCODE_DPAD_CENTER */] = KEY_ENTER,
-        [ 24  /* ANDROID_KEYCODE_VOLUME_UP */] = KEY_VOLUMEUP, // XF86XK_AudioRaiseVolume
-        [ 25  /* ANDROID_KEYCODE_VOLUME_DOWN */] = KEY_VOLUMEDOWN, // XF86XK_AudioLowerVolume
-        [ 26  /* ANDROID_KEYCODE_POWER */] = KEY_POWER,
-        [ 27  /* ANDROID_KEYCODE_CAMERA */] = KEY_CAMERA,
-        [ 28  /* ANDROID_KEYCODE_CLEAR */] = KEY_CLEAR,
-        [ 29  /* ANDROID_KEYCODE_A */] = KEY_A,
-        [ 30  /* ANDROID_KEYCODE_B */] = KEY_B,
-        [ 31  /* ANDROID_KEYCODE_C */] = KEY_C,
-        [ 32  /* ANDROID_KEYCODE_D */] = KEY_D,
-        [ 33  /* ANDROID_KEYCODE_E */] = KEY_E,
-        [ 34  /* ANDROID_KEYCODE_F */] = KEY_F,
-        [ 35  /* ANDROID_KEYCODE_G */] = KEY_G,
-        [ 36  /* ANDROID_KEYCODE_H */] = KEY_H,
-        [ 37  /* ANDROID_KEYCODE_I */] = KEY_I,
-        [ 38  /* ANDROID_KEYCODE_J */] = KEY_J,
-        [ 39  /* ANDROID_KEYCODE_K */] = KEY_K,
-        [ 40  /* ANDROID_KEYCODE_L */] = KEY_L,
-        [ 41  /* ANDROID_KEYCODE_M */] = KEY_M,
-        [ 42  /* ANDROID_KEYCODE_N */] = KEY_N,
-        [ 43  /* ANDROID_KEYCODE_O */] = KEY_O,
-        [ 44  /* ANDROID_KEYCODE_P */] = KEY_P,
-        [ 45  /* ANDROID_KEYCODE_Q */] = KEY_Q,
-        [ 46  /* ANDROID_KEYCODE_R */] = KEY_R,
-        [ 47  /* ANDROID_KEYCODE_S */] = KEY_S,
-        [ 48  /* ANDROID_KEYCODE_T */] = KEY_T,
-        [ 49  /* ANDROID_KEYCODE_U */] = KEY_U,
-        [ 50  /* ANDROID_KEYCODE_V */] = KEY_V,
-        [ 51  /* ANDROID_KEYCODE_W */] = KEY_W,
-        [ 52  /* ANDROID_KEYCODE_X */] = KEY_X,
-        [ 53  /* ANDROID_KEYCODE_Y */] = KEY_Y,
-        [ 54  /* ANDROID_KEYCODE_Z */] = KEY_Z,
-        [ 55  /* ANDROID_KEYCODE_COMMA */] = KEY_COMMA,
-        [ 56  /* ANDROID_KEYCODE_PERIOD */] = KEY_DOT,
-        [ 57  /* ANDROID_KEYCODE_ALT_LEFT */] = KEY_LEFTALT,
-        [ 58  /* ANDROID_KEYCODE_ALT_RIGHT */] = KEY_RIGHTALT,
-        [ 59  /* ANDROID_KEYCODE_SHIFT_LEFT */] = KEY_LEFTSHIFT,
-        [ 60  /* ANDROID_KEYCODE_SHIFT_RIGHT */] = KEY_RIGHTSHIFT,
-        [ 61  /* ANDROID_KEYCODE_TAB */] = KEY_TAB,
-        [ 62  /* ANDROID_KEYCODE_SPACE */] = KEY_SPACE,
-        [ 64  /* ANDROID_KEYCODE_EXPLORER */] = KEY_WWW,
-        [ 65  /* ANDROID_KEYCODE_ENVELOPE */] = KEY_MAIL,
-        [ 66  /* ANDROID_KEYCODE_ENTER */] = KEY_ENTER,
-        [ 67  /* ANDROID_KEYCODE_DEL */] = KEY_BACKSPACE,
-        [ 68  /* ANDROID_KEYCODE_GRAVE */] = KEY_GRAVE,
-        [ 69  /* ANDROID_KEYCODE_MINUS */] = KEY_MINUS,
-        [ 70  /* ANDROID_KEYCODE_EQUALS */] = KEY_EQUAL,
-        [ 71  /* ANDROID_KEYCODE_LEFT_BRACKET */] = KEY_LEFTBRACE,
-        [ 72  /* ANDROID_KEYCODE_RIGHT_BRACKET */] = KEY_RIGHTBRACE,
-        [ 73  /* ANDROID_KEYCODE_BACKSLASH */] = KEY_BACKSLASH,
-        [ 74  /* ANDROID_KEYCODE_SEMICOLON */] = KEY_SEMICOLON,
-        [ 75  /* ANDROID_KEYCODE_APOSTROPHE */] = KEY_APOSTROPHE,
-        [ 76  /* ANDROID_KEYCODE_SLASH */] = KEY_SLASH,
-        [ 81  /* ANDROID_KEYCODE_PLUS */] = KEY_KPPLUS,
-        [ 82  /* ANDROID_KEYCODE_MENU */] = KEY_CONTEXT_MENU,
-        [ 84  /* ANDROID_KEYCODE_SEARCH */] = KEY_SEARCH,
-        [ 85  /* ANDROID_KEYCODE_MEDIA_PLAY_PAUSE */] = KEY_PLAYPAUSE,
-        [ 86  /* ANDROID_KEYCODE_MEDIA_STOP */] = KEY_STOP_RECORD,
-        [ 87  /* ANDROID_KEYCODE_MEDIA_NEXT */] = KEY_NEXTSONG,
-        [ 88  /* ANDROID_KEYCODE_MEDIA_PREVIOUS */] = KEY_PREVIOUSSONG,
-        [ 89  /* ANDROID_KEYCODE_MEDIA_REWIND */] = KEY_REWIND,
-        [ 90  /* ANDROID_KEYCODE_MEDIA_FAST_FORWARD */] = KEY_FASTFORWARD,
-        [ 91  /* ANDROID_KEYCODE_MUTE */] = KEY_MUTE,
-        [ 92  /* ANDROID_KEYCODE_PAGE_UP */] = KEY_PAGEUP,
-        [ 93  /* ANDROID_KEYCODE_PAGE_DOWN */] = KEY_PAGEDOWN,
-        [ 111  /* ANDROID_KEYCODE_ESCAPE */] = KEY_ESC,
-        [ 112  /* ANDROID_KEYCODE_FORWARD_DEL */] = KEY_DELETE,
-        [ 113  /* ANDROID_KEYCODE_CTRL_LEFT */] = KEY_LEFTCTRL,
-        [ 114  /* ANDROID_KEYCODE_CTRL_RIGHT */] = KEY_RIGHTCTRL,
-        [ 115  /* ANDROID_KEYCODE_CAPS_LOCK */] = KEY_CAPSLOCK,
-        [ 116  /* ANDROID_KEYCODE_SCROLL_LOCK */] = KEY_SCROLLLOCK,
-        [ 117  /* ANDROID_KEYCODE_META_LEFT */] = KEY_LEFTMETA,
-        [ 118  /* ANDROID_KEYCODE_META_RIGHT */] = KEY_RIGHTMETA,
-        [ 120  /* ANDROID_KEYCODE_SYSRQ */] = KEY_PRINT,
-        [ 121  /* ANDROID_KEYCODE_BREAK */] = KEY_BREAK,
-        [ 122  /* ANDROID_KEYCODE_MOVE_HOME */] = KEY_HOME,
-        [ 123  /* ANDROID_KEYCODE_MOVE_END */] = KEY_END,
-        [ 124  /* ANDROID_KEYCODE_INSERT */] = KEY_INSERT,
-        [ 125  /* ANDROID_KEYCODE_FORWARD */] = KEY_FORWARD,
-        [ 126  /* ANDROID_KEYCODE_MEDIA_PLAY */] = KEY_PLAYCD,
-        [ 127  /* ANDROID_KEYCODE_MEDIA_PAUSE */] = KEY_PAUSECD,
-        [ 128  /* ANDROID_KEYCODE_MEDIA_CLOSE */] = KEY_CLOSECD,
-        [ 129  /* ANDROID_KEYCODE_MEDIA_EJECT */] = KEY_EJECTCD,
-        [ 130  /* ANDROID_KEYCODE_MEDIA_RECORD */] = KEY_RECORD,
-        [ 131  /* ANDROID_KEYCODE_F1 */] = KEY_F1,
-        [ 132  /* ANDROID_KEYCODE_F2 */] = KEY_F2,
-        [ 133  /* ANDROID_KEYCODE_F3 */] = KEY_F3,
-        [ 134  /* ANDROID_KEYCODE_F4 */] = KEY_F4,
-        [ 135  /* ANDROID_KEYCODE_F5 */] = KEY_F5,
-        [ 136  /* ANDROID_KEYCODE_F6 */] = KEY_F6,
-        [ 137  /* ANDROID_KEYCODE_F7 */] = KEY_F7,
-        [ 138  /* ANDROID_KEYCODE_F8 */] = KEY_F8,
-        [ 139  /* ANDROID_KEYCODE_F9 */] = KEY_F9,
-        [ 140  /* ANDROID_KEYCODE_F10 */] = KEY_F10,
-        [ 141  /* ANDROID_KEYCODE_F11 */] = KEY_F11,
-        [ 142  /* ANDROID_KEYCODE_F12 */] = KEY_F12,
-        [ 143  /* ANDROID_KEYCODE_NUM_LOCK */] = KEY_NUMLOCK,
-        [ 144  /* ANDROID_KEYCODE_NUMPAD_0 */] = KEY_KP0,
-        [ 145  /* ANDROID_KEYCODE_NUMPAD_1 */] = KEY_KP1,
-        [ 146  /* ANDROID_KEYCODE_NUMPAD_2 */] = KEY_KP2,
-        [ 147  /* ANDROID_KEYCODE_NUMPAD_3 */] = KEY_KP3,
-        [ 148  /* ANDROID_KEYCODE_NUMPAD_4 */] = KEY_KP4,
-        [ 149  /* ANDROID_KEYCODE_NUMPAD_5 */] = KEY_KP5,
-        [ 150  /* ANDROID_KEYCODE_NUMPAD_6 */] = KEY_KP6,
-        [ 151  /* ANDROID_KEYCODE_NUMPAD_7 */] = KEY_KP7,
-        [ 152  /* ANDROID_KEYCODE_NUMPAD_8 */] = KEY_KP8,
-        [ 153  /* ANDROID_KEYCODE_NUMPAD_9 */] = KEY_KP9,
-        [ 154  /* ANDROID_KEYCODE_NUMPAD_DIVIDE */] = KEY_KPSLASH,
-        [ 155  /* ANDROID_KEYCODE_NUMPAD_MULTIPLY */] = KEY_KPASTERISK,
-        [ 156  /* ANDROID_KEYCODE_NUMPAD_SUBTRACT */] = KEY_KPMINUS,
-        [ 157  /* ANDROID_KEYCODE_NUMPAD_ADD */] = KEY_KPPLUS,
-        [ 158  /* ANDROID_KEYCODE_NUMPAD_DOT */] = KEY_KPDOT,
-        [ 159  /* ANDROID_KEYCODE_NUMPAD_COMMA */] = KEY_KPCOMMA,
-        [ 160  /* ANDROID_KEYCODE_NUMPAD_ENTER */] = KEY_KPENTER,
-        [ 161  /* ANDROID_KEYCODE_NUMPAD_EQUALS */] = KEY_KPEQUAL,
-        [ 162  /* ANDROID_KEYCODE_NUMPAD_LEFT_PAREN */] = KEY_KPLEFTPAREN,
-        [ 163  /* ANDROID_KEYCODE_NUMPAD_RIGHT_PAREN */] = KEY_KPRIGHTPAREN,
-        [ 164  /* ANDROID_KEYCODE_VOLUME_MUTE */] = KEY_MUTE,
-        [ 165  /* ANDROID_KEYCODE_INFO */] = KEY_INFO,
-        [ 166  /* ANDROID_KEYCODE_CHANNEL_UP */] = KEY_CHANNELUP,
-        [ 167  /* ANDROID_KEYCODE_CHANNEL_DOWN */] = KEY_CHANNELDOWN,
-        [ 168  /* ANDROID_KEYCODE_ZOOM_IN */] = KEY_ZOOMIN,
-        [ 169  /* ANDROID_KEYCODE_ZOOM_OUT */] = KEY_ZOOMOUT,
-        [ 170  /* ANDROID_KEYCODE_TV */] = KEY_TV,
-        [ 208  /* ANDROID_KEYCODE_CALENDAR */] = KEY_CALENDAR,
-        [ 210  /* ANDROID_KEYCODE_CALCULATOR */] = KEY_CALC,
-};
-
-#ifdef __cplusplus
-}
 #endif

@@ -6,8 +6,8 @@ Include both the host build and this fork's exact revision, the affected
 protocol and a minimal reproduction. Do not include live admission tokens,
 Xauthority cookies or private file contents in a public issue.
 
-The Android host owns admission, content grants and placement policy. The
-embedded runtime owns its Binder authorization, X protocol, bounded transfers
+The Android host owns Java/Binder authorization, admission, content grants and
+placement policy. This native engine owns X protocol, bounded native transfers
 and rendering. A local X client is not an independently sandboxed application;
 do not expose the X server to untrusted clients or an unauthenticated network.
 

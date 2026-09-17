@@ -1,60 +1,55 @@
 # MagicDesk X11
 
-Embeddable X11 runtime for [MagicDesk](https://github.com/mekhontsev/magicdesk),
+Native X11 engine for [MagicDesk](https://github.com/mekhontsev/magicdesk),
 maintained as a focused fork of [Termux:X11](https://github.com/termux/termux-x11).
-The `embedded` Android library provides independently retained server
-connections and multiple output surfaces. Each output selects an individual X11
-window with its transient family, or an entire X screen. The standalone
-Termux:X11 Android application is not required by an embedding host.
+This working tree contains C/C++ server and renderer code, dependencies, native
+tests and CMake recipes. All Java, Binder, JNI and Android application integration
+belongs to MagicDesk's own x11-runtime module, not this fork.
 
-## Embedded Runtime
+## Native Engine
 
-- Independent X servers, display sockets, authentication and input focus.
-- Composite/Damage window discovery and content-only Android output surfaces.
-- Mouse, keyboard and Unicode input, resize, window titles and bounded icons.
+- Independent X servers, display sockets and Xauthority authentication.
+- Composite/Damage window discovery and multiple native output surfaces.
+- Individual window families or a whole X screen through the same output path.
+- Pointer, keyboard and Unicode input, geometry, titles and bounded icons.
 - Live X11 DPI, with optional XSettings ownership for application sessions.
-- Clipboard and copy drag-and-drop negotiation for text, HTML, PNG and files,
-  with streamed selections and explicit host-side Android URI grants.
-- AHardwareBuffer/EGL rendering and optional Vulkan copies for compatible
-  linear DMA-BUFs, retaining CPU fallback when unsupported.
-- Binder ownership for startup admission, normal shutdown and owner-death cleanup.
+- Clipboard and copy drag-and-drop negotiation for text, HTML, PNG and files.
+- AHardwareBuffer/EGL and optional Vulkan DMA-BUF copies, with CPU fallback.
+- Explicit connection replacement and native shutdown, without Java callbacks.
 
-The library owns X11 protocol and rendering, not Android task placement,
-Desktop/HOME, launcher discovery or permission policy. MagicDesk supplies those
-host responsibilities and the Termux execution environment. No firmware-specific
-display or graphics API is required.
+The public C contract is [embedded.h](lorie/src/main/cpp/lorie/embedded.h).
+The host owns authorization, process lifetime, clipboard grants, IME and Android
+window placement. No firmware-specific display or graphics API is required.
 
-## Build And Integrate
+## Build
 
-The embedded library targets Android 14 / API 34 and newer. Device coverage
-must be established separately from a successful build.
+Initialize submodules recursively. Use Android NDK 27.3.13750724, CMake 3.22+,
+Ninja, Python 3, Bison, patch and a host C compiler. API 34 is the native floor;
+successful compilation is not device coverage. Android 14 testing remains pending.
 
 ```sh
-git clone --recurse-submodules https://github.com/mekhontsev/magicdesk-x11.git
-cd magicdesk-x11
-./gradlew -p examples/android :app:assembleDebug :app:lintDebug :embedded:lintDebug
+cmake -S lorie/src/main/cpp -B build -G Ninja \
+  -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-34 -DLORIE_BUILD_SMOKE=ON
+cmake --build build --target lorie-smoke --parallel 4
+sh scripts/verify-native.sh
 ```
 
-Use JDK 17+, Android SDK 37, NDK 27.3.13750724, CMake, Ninja, Python 3, Bison,
-patch and a host C compiler. Native arm64 Termux builds and Windows/MSYS2 builds
-have additional setup in [Embedding](docs/embedding.md).
+The LorieNative CMake target is linked into the host's library. The smoke host
+links and exercises server readiness, connection ownership and normal shutdown
+without a JVM. Windows uses MSYS2 Bison/patch and UCRT64 for host generators,
+with the NDK for Android code. Termux can use its native Clang toolchain.
 
-[Embedding](docs/embedding.md) defines the authenticated bootstrap, session/output
-lifetimes, input, clipboard/drag protocols, rendering limits and executable
-fixtures. [Maintenance](docs/maintenance.md) describes upstream merges and
-verification. For end-user installation, application discovery and proot/chroot
-launching, use [MagicDesk's X11 guide](https://github.com/mekhontsev/magicdesk/blob/main/docs/x11.md).
+[Embedding](docs/embedding.md) describes native ownership, transport, rendering
+and fixtures. [Maintenance](docs/maintenance.md) describes upstream merges.
+Android builds and lifecycle tests live in
+[MagicDesk x11-runtime](https://github.com/mekhontsev/magicdesk/tree/main/x11-runtime).
 
-## Upstream Standalone Application
+## Upstream And License
 
-The original module paths and standalone app remain available to keep upstream
-merges practical. Their separate APK, companion package and launcher are not
-the embedded integration. Use the
-[upstream instructions](https://github.com/termux/termux-x11#setup-instructions)
-when working with the standalone application.
-
-## License
-
-[GNU GPL version 3](LICENSE). Upstream history, copyright notices and dependency
-licenses are retained. Binary distributions must include access to corresponding
-source, recursively pinned dependencies and build scripts.
+The standalone upstream APK and loader are intentionally removed from this
+working branch. Original Git ancestry and native paths remain for upstream
+merges; use upstream/master for the original complete application.
+[GNU GPL version 3](LICENSE), with original copyright and dependency notices
+preserved. Corresponding source includes the host adapter, this pinned fork,
+recursively pinned dependencies and build recipes.

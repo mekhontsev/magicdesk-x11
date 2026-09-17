@@ -17,7 +17,6 @@
 #include <libxcvt/libxcvt.h>
 #include <X11/X.h>
 #include <X11/Xmd.h>
-#include <sys/wait.h>
 #include <present.h>
 #include <sys/mman.h>
 #include <dri3.h>
@@ -103,8 +102,6 @@ static lorieScreenInfo lorieScreen = {
         .dri3 = TRUE,
         .vblank_queue = { &lorieScreen.vblank_queue, &lorieScreen.vblank_queue },
 }, *pvfb = &lorieScreen;
-static char *xstartup = NULL;
-static char **xstartupArgv = NULL;
 
 // Owned by the activity process, handed to us over the connection socket. Points at a placeholder until
 // the first connection so callers don't need a NULL check.
@@ -185,7 +182,6 @@ void OsVendorInit(void) {
     pthread_mutex_init(&lorieScreen.state->cursor.lock, &mutex_attr);
     lorieScreen.state->cursor.visible = TRUE;
 
-    lorieListenForKnocks();
 }
 
 // Queued from handleLorieEvents (input thread) to run on the main thread, i.e. the same thread that
@@ -237,57 +233,6 @@ void ddxGiveUp(unused enum ExitCode error) {
     exit(error);
 }
 
-static void* ddxReadyThread(unused void* cookie) {
-    if ((xstartup || xstartupArgv) && serverGeneration == 1) {
-        pid_t pid = fork();
-
-        if (!pid) {
-            char DISPLAY[16] = "";
-            sprintf(DISPLAY, ":%s", display);
-            setenv("DISPLAY", DISPLAY, 1);
-
-#define INHERIT_VAR(v) char *v = getenv("XSTARTUP_" #v); if (v && strlen(v)) setenv(#v, v, 1); unsetenv("XSTARTUP_" #v);
-            INHERIT_VAR(CLASSPATH)
-            INHERIT_VAR(LD_LIBRARY_PATH)
-            INHERIT_VAR(LD_PRELOAD)
-#undef INHERIT_VAR
-
-            if (xstartupArgv) {
-                execvp(xstartupArgv[0], xstartupArgv);
-                dprintf(2, "Failed to start command `%s`: %s\n", xstartupArgv[0], strerror(errno));
-                abort();
-            }
-
-            execlp(xstartup, xstartup, NULL);
-            execlp("sh", "sh", "-c", xstartup, NULL);
-            dprintf(2, "Failed to start command `sh -c \"%s\"`: %s\n", xstartup, strerror(errno));
-            abort();
-        } else {
-            int status;
-            do {
-                pid_t w = waitpid(pid, &status, 0);
-                if (w == -1) {
-                    perror("waitpid");
-                    GiveUp(SIGKILL);
-                }
-
-                if (WIFEXITED(status)) {
-                    printf("%d exited, status=%d\n", w, WEXITSTATUS(status));
-                } else if (WIFSIGNALED(status)) {
-                    printf("%d killed by signal %d\n", w, WTERMSIG(status));
-                } else if (WIFSTOPPED(status)) {
-                    printf("%d stopped by signal %d\n", w, WSTOPSIG(status));
-                } else if (WIFCONTINUED(status)) {
-                    printf("%d continued\n", w);
-                }
-            } while (!WIFEXITED(status) && !WIFSIGNALED(status));
-            GiveUp(SIGINT);
-        }
-    }
-
-    return NULL;
-}
-
 void drawSquare(int x, int y, int l, uint32_t color, uint32_t stride, uint32_t* pixels) {
     for (int i=0; i<l; i++) for (int j=0; j<l; j++)
         pixels[(j+y)*stride + x + i] = color;
@@ -309,26 +254,11 @@ Bool drawSquares() {
 }
 
 void ddxReady(void) {
-    if (getenv("MAGICDESK_X11_SESSION")) lorieDensityInit();
-    // Xorg has allocated DISPLAY and initialized screens, sockets and input before this boundary.
-    lorieEmbeddedServerReady();
+    lorieDensityInit();
     CursorVisible = TRUE;
     pScreenPtr->DisplayCursor(lorieMouse, pScreenPtr, rootCursor);
-    if (getenv("MAGICDESK_X11_SESSION"))
-        return; // The authenticated embedding host owns client startup.
-    if (NoListenAll)
-        return;
-    if (!xstartupArgv) {
-        if (xstartup && !strlen(xstartup)) // allow overriding $TERMUX_X11_XSTARTUP with empty xstartup arg
-            return;
-        if (!xstartup || !strlen(xstartup))
-            xstartup = getenv("TERMUX_X11_XSTARTUP");
-        if (!xstartup || !strlen(xstartup))
-            return;
-    }
-
-    pthread_t t;
-    pthread_create(&t, NULL, ddxReadyThread, NULL);
+    // The embedding host owns client startup after Xorg is fully initialized.
+    lorieEmbeddedServerReady();
 }
 
 void OsVendorFatalError(unused const char *f, unused va_list args) {
@@ -346,8 +276,6 @@ void ddxInputThreadInit(void) {}
 #endif
 
 void ddxUseMsg(void) {
-    ErrorF("-xstartup \"command\"\n");
-    ErrorF("-- command args...     start `command` after server startup\n");
     ErrorF("-legacy-drawing        use legacy drawing, without using AHardwareBuffers\n");
     ErrorF("-force-bgra            force flipping colours (RGBA->BGRA)\n");
     ErrorF("-disable-dri3          disabling DRI3 support (to let lavapipe work)\n");
@@ -357,28 +285,6 @@ void ddxUseMsg(void) {
 }
 
 int ddxProcessArgument(unused int argc, unused char *argv[], unused int i) {
-    if (strcmp(argv[i], "-xstartup") == 0) {  /* -xstartup "command" */
-        CHECK_FOR_REQUIRED_ARGUMENTS(1);
-        if (xstartupArgv) {
-            UseMsg();
-            FatalError("-xstartup and -- are mutually exclusive\n");
-        }
-        xstartup = argv[++i];
-        return 2;
-    }
-
-    if (strcmp(argv[i], "--") == 0) {  /* -- command args...: everything after goes verbatim into xstartupArgv */
-        CHECK_FOR_REQUIRED_ARGUMENTS(1);
-        if (xstartup) {
-            UseMsg();
-            FatalError("-xstartup and -- are mutually exclusive\n");
-        }
-        int n = argc - i - 1;
-        xstartupArgv = calloc(n + 1, sizeof(char*)); /* argv passed to us isn't guaranteed NULL-terminated past argc */
-        memcpy(xstartupArgv, &argv[i + 1], n * sizeof(char*));
-        return argc - i;
-    }
-
     if (strcmp(argv[i], "-legacy-drawing") == 0) {
         pvfb->root.legacyDrawing = TRUE;
         return 1;
@@ -897,7 +803,6 @@ void InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
 
     rendererTestCapabilities(&pvfb->root.legacyDrawing, &pvfb->gpuPresentDisabled);
     xorgGlxCreateVendor();
-    lorieInitClipboard();
     lorieDataInit();
     if (-1 == AddScreen(lorieScreenInit, argc, argv)) {
         FatalError("Couldn't add screen\n");

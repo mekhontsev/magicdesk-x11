@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 project(lorie)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+add_compile_options(-ffunction-sections -fdata-sections)
 
 set(can_use_assembler TRUE)
 enable_language(ASM)
@@ -88,3 +90,10 @@ set(CMAKE_REQUIRED_QUIET ${CMAKE_REQUIRED_QUIET_OLD})
 foreach(project xorgproto fontenc md pixman tirpc xshmfence Xdmcp Xau Xfont2 xkbcomp xserver)
     include(recipes/${project}.cmake)
 endforeach()
+
+option(LORIE_BUILD_SMOKE "Link the native contract smoke host" OFF)
+if(LORIE_BUILD_SMOKE)
+    add_executable(lorie-smoke "${CMAKE_CURRENT_SOURCE_DIR}/../../../../examples/native-server.c")
+    target_link_libraries(lorie-smoke PRIVATE LorieNative)
+    target_link_options(lorie-smoke PRIVATE -nostdlib++ -Wl,--no-undefined -Wl,--gc-sections)
+endif()

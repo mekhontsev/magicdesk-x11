@@ -26,7 +26,8 @@ int main(void) {
     xcb_screen_t* screen = xcb_setup_roots_iterator(xcb_get_setup(connection)).data;
     xcb_window_t window = xcb_generate_id(connection);
     uint32_t values[] = {0x247040, XCB_EVENT_MASK_STRUCTURE_NOTIFY
-            | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION};
+            | XCB_EVENT_MASK_BUTTON_PRESS | XCB_EVENT_MASK_BUTTON_RELEASE | XCB_EVENT_MASK_POINTER_MOTION
+            | XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE};
     xcb_create_window(connection, screen->root_depth, window, screen->root,
             -80, -1200, 320, 240, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT, screen->root_visual,
             XCB_CW_BACK_PIXEL | XCB_CW_EVENT_MASK, values);
@@ -53,6 +54,9 @@ int main(void) {
                 xcb_button_press_event_t* e = (void*) event;
                 printf("INPUT type=%d button=%u local=%d,%d root=%d,%d\n",
                         type, e->detail, e->event_x, e->event_y, e->root_x, e->root_y);
+            } else if (type == XCB_KEY_PRESS || type == XCB_KEY_RELEASE) {
+                xcb_key_press_event_t* e = (void*) event;
+                printf("KEY type=%d code=%u\n", type, e->detail);
             } else if (type == XCB_CLIENT_MESSAGE) {
                 xcb_client_message_event_t* e = (void*) event;
                 if (e->type == protocols && e->data.data32[0] == close) running = 0;

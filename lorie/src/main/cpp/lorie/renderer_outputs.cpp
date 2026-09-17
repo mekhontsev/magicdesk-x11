@@ -9,10 +9,9 @@
 #include <new>
 #include "lorie.h"
 
-bool Renderer::setOutputSurface(JNIEnv* env, uint32_t id, jobject surface, bool release) {
+bool Renderer::setOutputSurface(uint32_t id, ANativeWindow* window, bool release) {
     if (!id) return false;
-    ANativeWindow* window = surface ? ANativeWindow_fromSurface(env, surface) : nullptr;
-    if (surface && !window) return false;
+    if (window) ANativeWindow_acquire(window);
     bool success = release;
     pthread_mutex_lock(&stateLock);
     Output* output = outputs;

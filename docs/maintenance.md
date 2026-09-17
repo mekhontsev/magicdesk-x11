@@ -1,10 +1,9 @@
 # Maintenance
 
-`main` contains the MagicDesk embedding work. `upstream/master` is the original
-Termux:X11 history. The initial base is
-`53f8437326dbbe26b3756480aece7f604d2c1900`. Do not squash or copy the upstream
-tree into a new unrelated repository. Keep embedded-only classes in `embedded`,
-and keep native output/session responsibilities in focused source files.
+The working branch contains the native engine only. Preserve the original
+Termux:X11 ancestry (initial base 53f8437326dbbe26b3756480aece7f604d2c1900).
+Do not squash it into an unrelated repository. Native dependency paths remain
+unchanged to keep shared rendering, protocol and build changes reviewable.
 
 ```sh
 git remote add upstream https://github.com/termux/termux-x11.git
@@ -14,27 +13,27 @@ git merge upstream/master
 git submodule update --init --recursive
 ```
 
-Resolve shared protocol, rendering and build changes explicitly. One server
-connection must keep one Present-queue consumer even when several outputs are
-visible. Compare against the upstream standalone path before attributing a GPU
-fallback to the embedding work. Preserve original copyright/license notices.
+Add the upstream remote only once. Its remote-tracking branch retains the full
+upstream tree independently of our working branch. Resolve modify/delete
+conflicts deliberately: do not restore Java, AIDL, Android application resources,
+Gradle modules or the old standalone JNI/clipboard/viewport path. Port necessary
+native changes into the retained engine. Keep copyright/license notices.
 
-Run the example build and Lint, then verify complete X-screen output, two
-window outputs, two simultaneous servers, resizing, map/unmap, input isolation,
-connection/output recreation and owner-death/normal-shutdown cleanup. Exercise
-both ordinary pixmaps and the AHardwareBuffer Present fixture. Build checks
-alone do not establish support on a new Android release or graphics driver.
+The public embedded.h contract has opaque connections and native callbacks;
+it must not name a Java class, host package or Binder interface. Android lifecycle,
+authorization and JNI changes belong in MagicDesk, which pins this native revision.
+Change both sides together when modifying the native contract; no compatibility
+layer for older MagicDesk builds is required.
 
-Also exercise clipboard and XDND with `examples/content-window.c`: text, HTML,
-PNG, readable file paths, large INCR selections and same-/cross-server drops.
-Verify source loss, cancellation, bounded transfers and owner-death cleanup.
-Run Android content-grant and clipboard-focus workflows in the embedding host;
-the example alone cannot verify its authorization policy. Geometry, icon and
-density fixtures are described in [Embedding](embedding.md).
+Run scripts/verify-native.sh and link lorie-smoke for both supported Android ABIs.
+The fork's CI checks Linux and Windows NDK builds without Java or Gradle.
+Then run MagicDesk's Java tests, build/Lint and Android example. Verify complete
+screen output, two window outputs, independent servers, input, resize, reconnect,
+output recreation, normal shutdown and owner-death cleanup. Exercise AHB Present
+and ordinary pixmaps, clipboard/XDND, large INCR and transfer cancellation.
+Build checks alone do not establish support on a new Android release or driver.
 
-CI packages corresponding source with initialized submodules before native
-configuration: upstream CMake applies tracked patches inside submodule
-worktrees. The source archive therefore contains pinned upstream sources and
-the recipes which apply those patches, rather than silently recording a
-different submodule revision. Binaries retain component license notices as
-Android assets. Never commit APKs, signing keys, local logs or bootstrap tokens.
+Package corresponding source before native configuration: CMake applies tracked
+patches inside pinned dependency worktrees. The distributable includes original
+dependency revisions and the recipes applying those patches. MagicDesk packages
+component notices as assets. Never commit binaries, local reports or session tokens.
