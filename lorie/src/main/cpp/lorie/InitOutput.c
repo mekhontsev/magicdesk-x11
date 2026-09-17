@@ -262,6 +262,7 @@ Bool drawSquares() {
 
 void ddxReady(void) {
     lorieDensityInit();
+    lorieWindowManagerReady();
     CursorVisible = TRUE;
     pScreenPtr->DisplayCursor(lorieMouse, pScreenPtr, rootCursor);
     // The embedding host owns client startup after Xorg is fully initialized.

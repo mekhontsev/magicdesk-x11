@@ -118,6 +118,26 @@ native fixtures, independent of Android Desktop self-tests.
 
 ### Window Discovery
 
+`MAGICDESK_X11_HOST_WM=1` enables the dedicated-application EWMH bridge before
+client startup. It owns `WM_S0`, publishes `_NET_SUPPORTING_WM_CHECK` and only
+the supported state hints, and yields if another window manager takes the
+selection. Leave it disabled for whole Linux desktops. The native bridge owns
+X protocol, not Android task policy.
+
+Window snapshots carry `hostManaged`, `fullscreenSerial`, `fullscreenRequested`
+and `fullscreenActual`. Initial fullscreen hints and `_NET_WM_STATE` add/remove/
+toggle messages create requests. `LORIE_OUTPUT_FULLSCREEN_CONFIRM` carries
+the XID, serial in `x`, and actual state in `down`. Only the current serial may
+update `_NET_WM_STATE`; unrelated atoms are retained. Serials are allocated
+across the session to reject replies to destroyed/reused windows. Renderer
+reconnection republishes state without forgetting client intent. A host must
+select one responder when multiple outputs view an XID. Window geometry still
+comes from the host Surface, never from an X-side fullscreen resize guess.
+
+`examples/fullscreen-state-test.c` covers pending toggles, stale replies,
+rejection and manual restore. `control-window XID fullscreen 0|1|2` sends the
+real EWMH client message for end-to-end checks.
+
 The window callbacks followed by `windowsCommitted` publish complete snapshots after reconciliation,
 never intermediate removals from a batch. Discovery follows X properties and
 screen/property callbacks, without polling. A newly discovered application

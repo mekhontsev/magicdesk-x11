@@ -23,6 +23,8 @@ timeout 15 "$work/queue"
 "$cxx" -std=c++17 -O2 -Wall -Wextra -UNDEBUG "$root/examples/command-queue-test.cpp" -o "$work/commands"
 timeout 15 "$work/lock"
 timeout 15 "$work/commands"
+"$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/fullscreen-state-test.c" -o "$work/fullscreen"
+timeout 15 "$work/fullscreen"
 
 # Buffer ownership and AHardwareBuffer failure injection use Android's actual ABI.
 if [ "$(uname -o)" = Android ]; then

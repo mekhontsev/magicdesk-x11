@@ -152,7 +152,8 @@ typedef union {
     } layer;
     struct {
         uint8_t t, removed, mapped, hasIcon;
-        uint32_t window;
+        uint32_t window, fullscreenSerial;
+        uint8_t hostManaged, fullscreenRequested, fullscreenActual;
         char title[256];
     } windowInfo;
 } lorieEvent;

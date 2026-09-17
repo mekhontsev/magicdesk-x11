@@ -74,7 +74,9 @@ struct LorieConnection {
         header.windowInfo.title[sizeof(header.windowInfo.title) - 1] = 0;
         callbacks.window(context, header.windowInfo.window, header.windowInfo.title,
                 header.windowInfo.hasIcon ? windowIcon : nullptr,
-                header.windowInfo.removed, header.windowInfo.mapped);
+                header.windowInfo.removed, header.windowInfo.mapped, header.windowInfo.hostManaged,
+                header.windowInfo.fullscreenSerial, header.windowInfo.fullscreenRequested,
+                header.windowInfo.fullscreenActual);
         windowPending = false; windowIconBytes = 0;
         return 1;
     }

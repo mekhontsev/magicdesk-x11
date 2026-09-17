@@ -22,7 +22,8 @@ typedef struct {
     void (*frame)(void*, uint32_t output, uint32_t window, int width, int height, bool available);
     void (*disconnected)(void*);
     // Text and icon memory is borrowed only for the callback. Icons are 64x64 ARGB.
-    void (*window)(void*, uint32_t id, const char* title, const uint32_t* icon, bool removed, bool mapped);
+    void (*window)(void*, uint32_t id, const char* title, const uint32_t* icon, bool removed, bool mapped,
+            bool hostManaged, uint32_t fullscreenSerial, bool fullscreenRequested, bool fullscreenActual);
     void (*windowsCommitted)(void*);
     // Receiver owns descriptor when nonnegative. Callbacks run on the connection's Looper.
     void (*data)(void*, int operation, int channel, uint32_t serial, uint32_t offer,
@@ -32,7 +33,8 @@ typedef struct {
 enum LorieCommand {
     LORIE_OUTPUT_BIND = 0, LORIE_OUTPUT_RESIZE = 1, LORIE_OUTPUT_POINTER = 2, LORIE_OUTPUT_KEY = 3,
     LORIE_OUTPUT_RELEASE = 4, LORIE_OUTPUT_FOCUS = 5, LORIE_OUTPUT_TEXT = 6,
-    LORIE_OUTPUT_OBSERVE = 7, LORIE_OUTPUT_CLOSE = 8, LORIE_OUTPUT_DPI = 9
+    LORIE_OUTPUT_OBSERVE = 7, LORIE_OUTPUT_CLOSE = 8, LORIE_OUTPUT_DPI = 9,
+    LORIE_OUTPUT_FULLSCREEN_CONFIRM = 10
 };
 
 enum LorieDataCommand {
