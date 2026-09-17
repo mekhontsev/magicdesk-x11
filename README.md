@@ -39,6 +39,7 @@ The LorieNative CMake target is linked into the host's library. The smoke host
 links and exercises server readiness, connection ownership and normal shutdown
 without a JVM. Windows uses MSYS2 Bison/patch and UCRT64 for host generators,
 with the NDK for Android code. Termux can use its native Clang toolchain.
+CI targets Android `arm64-v8a` on both Linux and Windows build hosts.
 
 [Embedding](docs/embedding.md) describes native ownership, transport, rendering
 and fixtures. [Maintenance](docs/maintenance.md) describes upstream merges.
