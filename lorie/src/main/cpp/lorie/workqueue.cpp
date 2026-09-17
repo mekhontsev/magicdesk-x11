@@ -1,5 +1,7 @@
 #include <cstdlib>
 #include <cstdint>
+// Load C++ math declarations before Xorg defines its min/max macros.
+#include <cmath>
 #include <pthread.h>
 
 extern "C" {

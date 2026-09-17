@@ -13,6 +13,7 @@ permissions:
 jobs:
   native:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-24.04, windows-2025]
         abi: [arm64-v8a, x86_64]
@@ -23,9 +24,9 @@ jobs:
         with:
           submodules: recursive
       - uses: android-actions/setup-android@v3
-      - name: Android toolchain
-        shell: bash
-        run: sdkmanager "ndk;27.3.13750724" "cmake;3.22.1"
+        with:
+          packages: 'ndk;27.3.13750724 cmake;3.22.1'
+          log-accepted-android-sdk-licenses: false
       - uses: msys2/setup-msys2@v2
         if: runner.os == 'Windows'
         with:
