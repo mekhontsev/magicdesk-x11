@@ -295,10 +295,17 @@ void loriePublishOutputs(struct lorie_shared_server_state* state) {
         memcpy(output->layers, frame.layers, frame.count * sizeof(lorieEvent));
         lorieEvent event = {.frame = {.t = EVENT_OUTPUT_FRAME, .output = output->id,
                 .window = output->window, .revision = ++output->revision}};
-        lorie_mutex_lock(&state->lock, &state->lockingPid);
+        LorieBuffer* buffers[MAX_FAMILY_LAYERS] = {0};
+        lorieServerLock(&state->lock);
+        for (unsigned i = 0; i < frame.count; i++)
+            buffers[i] = lorieExportPixmap(frame.images[i]->pixmap);
+        pthread_mutex_unlock(&state->lock);
+        // IPC may apply backpressure. Never hold the pixel lock while publishing:
+        // the receiver can be waiting for its renderer, which needs that lock.
         for (unsigned i = 0; i < frame.count; i++) {
-            LorieBuffer* buffer = lorieExportPixmap(frame.images[i]->pixmap);
+            LorieBuffer* buffer = buffers[i];
             if (!buffer) continue;
+            lorieRegisterBuffer(buffer);
             frame.layers[i].layer.bufferId = LorieBuffer_description(buffer)->id;
             lorieSendOutputFrame(&frame.layers[i]);
             if (frame.layers[i].layer.window == window->drawable.id) {
@@ -307,7 +314,6 @@ void loriePublishOutputs(struct lorie_shared_server_state* state) {
                 event.frame.height = window->drawable.height;
             }
         }
-        lorie_mutex_unlock(&state->lock, &state->lockingPid);
         // Commit the complete family atomically: no intermediate main-only frame.
         lorieSendOutputFrame(&event);
         output->changed = FALSE;

@@ -110,7 +110,7 @@ static pthread_cond_t* volatile rendererCond = &rendererCondPlaceholder;
 
 typedef struct {
     LorieBuffer *buffer;
-    bool flipped, wasLocked, imported, outputExported;
+    bool flipped, wasLocked, imported, outputExported, accessGpuLocked;
     void *locked;
     void *mem;
     DmaCopySource* dmaSource;
@@ -151,8 +151,14 @@ LorieBuffer* lorieExportPixmap(PixmapPtr pixmap) {
         LorieBuffer_unlock(buffer);
         if (LorieBuffer_lock(buffer, &priv->locked)) FatalError("Output buffer lock failed\n");
     }
-    lorieRegisterBuffer(buffer);
     return buffer;
+}
+
+static bool rendererAlive(unused void* context) { return lorieConnectionAlive(); }
+
+void lorieServerLock(pthread_mutex_t* mutex) {
+    int error = lorieLockShared(mutex, rendererAlive, NULL);
+    if (error) FatalError("X11 shared buffer lock failed: %s\n", strerror(error));
 }
 
 static Bool lorieServerDebugEnabled = FALSE;
@@ -180,6 +186,7 @@ void OsVendorInit(void) {
     pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&lorieScreen.state->lock, &mutex_attr);
     pthread_mutex_init(&lorieScreen.state->cursor.lock, &mutex_attr);
+    pthread_mutexattr_destroy(&mutex_attr);
     lorieScreen.state->cursor.visible = TRUE;
 
 }
@@ -402,7 +409,7 @@ static void lorieSetCursor(DeviceIntPtr pDev, unused ScreenPtr pScr, CursorPtr p
 
     CursorBitsPtr bits = pCurs ? pCurs->bits : NULL;
 
-    lorie_mutex_lock(&pvfb->state->cursor.lock, &pvfb->state->cursor.lockingPid);
+    lorieServerLock(&pvfb->state->cursor.lock);
     if (pCurs && bits) {
         pvfb->state->cursor.xhot = bits->xhot;
         pvfb->state->cursor.yhot = bits->yhot;
@@ -414,7 +421,7 @@ static void lorieSetCursor(DeviceIntPtr pDev, unused ScreenPtr pScr, CursorPtr p
         pvfb->state->cursor.width = pvfb->state->cursor.height = 0;
     }
     pvfb->state->cursor.updated = true;
-    lorie_mutex_unlock(&pvfb->state->cursor.lock, &pvfb->state->cursor.lockingPid);
+    pthread_mutex_unlock(&pvfb->state->cursor.lock);
 
     lorieMoveCursor(NULL, NULL, x0, y0);
 }
@@ -1115,12 +1122,12 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
     Bool gpuLocked = lorieNeedsGpuLock(pPix, priv, index);
     if (gpuLocked)
-        lorie_mutex_lock(&pvfb->state->lock, &pvfb->state->lockingPid);
+        lorieServerLock(&pvfb->state->lock);
 
     if (!priv->locked && !priv->mem) {
         int err = LorieBuffer_lock(priv->buffer, &priv->locked);
         if (err) {
-            if (gpuLocked) lorie_mutex_unlock(&pvfb->state->lock, &pvfb->state->lockingPid);
+            if (gpuLocked) pthread_mutex_unlock(&pvfb->state->lock);
             dprintf(2, "Failed to lock buffer, err %d\n", err);
             return FALSE;
         }
@@ -1129,19 +1136,21 @@ Bool loriePrepareAccess(PixmapPtr pPix, int index) {
         priv->wasLocked = TRUE;
 
     pPix->devPrivate.ptr = priv->locked ?: priv->mem;
+    priv->accessGpuLocked = gpuLocked;
     return TRUE;
 }
 
-void lorieFinishAccess(PixmapPtr pPix, int index) {
+void lorieFinishAccess(PixmapPtr pPix, unused int index) {
     LoriePixmapPriv *priv = exaGetPixmapDriverPrivate(pPix);
-    if (lorieNeedsGpuLock(pPix, priv, index))
-        lorie_mutex_unlock(&pvfb->state->lock, &pvfb->state->lockingPid);
-
     if (!priv->wasLocked) {
         LorieBuffer_unlock(priv->buffer);
         priv->locked = NULL;
         priv->wasLocked = FALSE;
     }
+    // EXA folds nested access to one Prepare/Finish pair. Release the acquisition,
+    // not a predicate whose GPU/export state may have changed during the access.
+    if (priv->accessGpuLocked) pthread_mutex_unlock(&pvfb->state->lock);
+    priv->accessGpuLocked = false;
 }
 
 static LoriePixmapPriv *dmaSourcePixmap, *dmaDestinationPixmap;
@@ -1181,7 +1190,7 @@ static Bool loriePrepareDmaCopy(PixmapPtr source, PixmapPtr destination,
     if (!dst->dmaDestination) return FALSE;
     // The renderer fences its reads before releasing this shared lock. Release CPU ownership
     // while Vulkan writes the AHB, then restore the pixmap's existing mapping in DoneCopy.
-    lorie_mutex_lock(&pvfb->state->lock, &pvfb->state->lockingPid);
+    lorieServerLock(&pvfb->state->lock);
     dmaDestinationWasLocked = dst->locked != NULL;
     if (dst->locked) { LorieBuffer_unlock(dst->buffer); dst->locked = NULL; }
     dmaSourcePixmap = src;
@@ -1211,7 +1220,7 @@ static void lorieDoneDmaCopy(unused PixmapPtr destination) {
     if (dmaDestinationWasLocked && LorieBuffer_lock(dmaDestinationPixmap->buffer, &dmaDestinationPixmap->locked))
         FatalError("Cannot restore DMA-copy destination mapping\n");
     dmaSourcePixmap = dmaDestinationPixmap = NULL;
-    lorie_mutex_unlock(&pvfb->state->lock, &pvfb->state->lockingPid);
+    pthread_mutex_unlock(&pvfb->state->lock);
 }
 
 static ExaDriverRec lorieExa = {

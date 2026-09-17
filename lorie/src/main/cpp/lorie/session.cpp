@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <cstdio>
 #include <android/looper.h>
+#include "command_queue.h"
 #include "lorie.h"
 #include "embedded.h"
 #include "window_icon.h"
@@ -17,6 +18,7 @@ struct LorieConnection {
     uint32_t windowIcon[LORIE_WINDOW_ICON_PIXELS]{};
     size_t windowIconBytes = 0;
     bool windowPending = false;
+    LorieCommandQueue commands;
     LorieCallbacks callbacks;
     void* context;
 
@@ -25,28 +27,39 @@ struct LorieConnection {
     }
 
     void disconnect(bool notify) {
+        // Cancel a renderer lock wait before waiting for Surface/shared-state
+        // release. The descriptor remains valid until that acknowledgement.
+        if (fd >= 0) shutdown(fd, SHUT_RDWR);
         // The renderer acknowledges detachment before its socket descriptor can be reused.
         renderer.setSharedState(nullptr);
+        renderer.peerFd = -1;
         if (fd != -1) {
             ALooper_removeFd(ALooper_forThread(), fd);
             close(fd);
             fd = -1;
         }
         renderer.removeAllBuffers();
+        commands.clear();
         headerBytes = 0;
         windowPending = false; windowIconBytes = 0;
         if (notify) callbacks.disconnected(context);
     }
 
-    bool sendAll(const void* bytes, size_t size) {
-        size_t sent = 0;
-        while (fd >= 0 && sent < size) {
-            ssize_t count = send(fd, (const char*)bytes + sent, size - sent, MSG_NOSIGNAL);
-            if (count < 0 && errno == EINTR) continue;
-            if (count <= 0) { disconnect(true); return false; }
-            sent += count;
+    bool watch() {
+        if (fd < 0) return false;
+        int events = ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP;
+        if (!commands.empty()) events |= ALOOPER_EVENT_OUTPUT;
+        return ALooper_addFd(ALooper_forThread(), fd, 0, events,
+                +[](int, int ready, void* data) { return ((LorieConnection*)data)->receive(ready); }, this) >= 0;
+    }
+
+    bool sendAll(const void* bytes, size_t size, int descriptor = -1) {
+        if (fd < 0) return false;
+        if (!commands.append(bytes, size, descriptor) || !commands.flush(fd) || !watch()) {
+            disconnect(true);
+            return false;
         }
-        return sent == size;
+        return true;
     }
 
     int receiveWindow() {
@@ -68,6 +81,10 @@ struct LorieConnection {
 
     int receive(int events) {
         if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) { disconnect(true); return 0; }
+        if (events & ALOOPER_EVENT_OUTPUT) {
+            if (!commands.flush(fd) || !watch()) { disconnect(true); return 0; }
+        }
+        if (!(events & ALOOPER_EVENT_INPUT)) return 1;
         if (windowPending) return receiveWindow();
         ssize_t count = recv(fd, (char*)&header + headerBytes, sizeof(header) - headerBytes, MSG_DONTWAIT);
         if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
@@ -128,20 +145,18 @@ struct LorieConnection {
         disconnect(false);
         fd = incoming;
         if (fd < 0) return false;
-        if (ALooper_addFd(ALooper_forThread(), fd, 0, ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP,
-                +[](int, int events, void* data) { return ((LorieConnection*)data)->receive(events); }, this) < 0) {
+        renderer.peerFd = fd;
+        if (!watch()) {
             disconnect(false);
             return false;
         }
         lorieEvent event{.type = EVENT_RENDERER_WAKEUP_COND};
-        if (!sendAll(&event, sizeof(event)) ||
-                ancil_send_fd(fd, renderer.getWakeupCondFd()) < 0) {
+        if (!sendAll(&event, sizeof(event), renderer.getWakeupCondFd())) {
             disconnect(false);
             return false;
         }
         event.type = EVENT_GPU_DONE_FD;
-        if (!sendAll(&event, sizeof(event)) ||
-                ancil_send_fd(fd, renderer.gpuDoneFd) < 0) {
+        if (!sendAll(&event, sizeof(event), renderer.gpuDoneFd)) {
             disconnect(false);
             return false;
         }
@@ -186,15 +201,14 @@ void lorieConnectionData(LorieConnection* connection, int operation, int channel
             .hasFd = (uint8_t)(descriptor >= 0), .serial = serial, .offer = offer,
             .output = output, .window = window, .x = x, .y = y};
     snprintf(event.data.mime, sizeof(event.data.mime), "%s", type ? type : "");
-    if (connection->sendAll(&event, sizeof(event)) && descriptor >= 0 && ancil_send_fd(connection->fd, descriptor) < 0)
-        connection->disconnect(true);
+    connection->sendAll(&event, sizeof(event), descriptor);
 }
 
 void lorieConnectionDestroy(LorieConnection* connection) {
     if (!connection) return;
+    connection->disconnect(false);
     while (connection->renderer.outputs)
         connection->renderer.setOutputSurface(connection->renderer.outputs->id, nullptr, true);
-    connection->disconnect(false);
     connection->renderer.destroy();
     connection->~LorieConnection();
     free(connection);

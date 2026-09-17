@@ -16,6 +16,7 @@
 #include "linux/input-event-codes.h"
 #include "buffer.h"
 #include "data_exchange.h"
+#include "shared_lock.h"
 
 
 #ifdef __cplusplus
@@ -42,47 +43,7 @@ void lorieSendSyncReply(uint32_t serial);
 
 __unused void rendererTestCapabilities(int* legacy_drawing, int* gpu_present_disabled);
 
-static inline __always_inline void lorie_mutex_lock(pthread_mutex_t* mutex, pid_t* lockingPid) {
-    // Unfortunately there is no robust mutexes in bionic.
-    // Posix does not define any valid way to unlock stuck non-robust mutex
-    // so in the case if renderer or X server process unexpectedly die with locked mutex
-    // we will simply reinitialize it.
-    struct timespec ts = {0};
-    while(true) {
-        clock_gettime(CLOCK_MONOTONIC, &ts);
-
-        // 33 msec is enough to complete any drawing operation on both X server and renderer side
-        // In the case if mutex is locked most likely other thread died with the mutex locked
-        ts.tv_nsec += 33UL * 1000000UL;
-        if (ts.tv_nsec >= 1000000000L) {
-            ts.tv_sec  += ts.tv_nsec / 1000000000L;
-            ts.tv_nsec  = ts.tv_nsec % 1000000000L;
-        }
-
-        int ret = pthread_mutex_timedlock(mutex, &ts);
-        if (ret == ETIMEDOUT) {
-            if (*lockingPid == getpid() || lorieConnectionAlive())
-                continue;
-
-            pthread_mutexattr_t attr;
-            pthread_mutex_t initializer = PTHREAD_MUTEX_INITIALIZER;
-            pthread_mutexattr_init(&attr);
-            pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-            pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
-            memcpy(mutex, &initializer, sizeof(initializer));
-            pthread_mutex_init(mutex, &attr);
-            // Mutex will be locked fine on the next iteration
-        } else {
-            *lockingPid = getpid();
-            return;
-        }
-    }
-}
-
-static inline __always_inline void lorie_mutex_unlock(pthread_mutex_t* mutex, pid_t* lockingPid) {
-    *lockingPid = 0;
-    pthread_mutex_unlock(mutex);
-}
+void lorieServerLock(pthread_mutex_t* mutex);
 
 typedef enum {
     EVENT_UNKNOWN __unused = 0,
@@ -235,7 +196,6 @@ struct lorie_shared_server_state {
      * tearing, texture garbling and other visual artifacts so we should block X server while we are drawing.
      */
     pthread_mutex_t lock; // initialized at X server side.
-    pid_t lockingPid;
 
     /*
      * Single-producer (X server, present_execute_copy)/single-consumer (renderer) ring buffer
@@ -281,7 +241,6 @@ struct lorie_shared_server_state {
         // We should not allow updating cursor content the same time renderer draws it.
         // locking the mutex protecting the root window can cause waiting for the frame to be drawn which is unacceptable
         pthread_mutex_t lock; // initialized at X server side.
-        pid_t lockingPid;
         uint32_t x, y, xhot, yhot, width, height;
         uint32_t bits[512*512]; // 1 megabyte should be enough for any cursor up to 512x512
         // Signals to renderer to update cursor's texture or its coordinates
@@ -344,6 +303,8 @@ struct Renderer {
     pthread_spinlock_t bufferLock{};
     int stateCondFd = -1;
     struct lorie_shared_server_state* state = nullptr;
+    int peerFd = -1; // Borrowed from this connection until shared-state detachment is acknowledged.
+    bool connectionFailed = false;
     // FBO used to blit deferred Present "copy" entries (see lorieTryScheduleGpuCopy) into the root texture.
     GLuint gpuCopyFbo = 0;
 
@@ -372,6 +333,7 @@ struct Renderer {
     int getWakeupCondFd() const;
     void testCapabilities(int* legacy_drawing, int* gpu_present_disabled);
     void setSharedState(struct lorie_shared_server_state* newState);
+    bool lockSharedState();
     void addBuffer(LorieBuffer* buf);
     void removeBuffer(uint64_t id);
     void removeAllBuffers();

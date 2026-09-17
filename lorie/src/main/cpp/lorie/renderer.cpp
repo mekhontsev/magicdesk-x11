@@ -29,6 +29,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <sys/eventfd.h>
+#include <poll.h>
 #include "list.h"
 #include "lorie.h"
 #include "gpu_completion.h"
@@ -662,11 +663,27 @@ uint64_t Renderer::applyPendingGpuCopiesLocked() {
 // Standalone entry point used by the renderer thread's main loop. Used when no redraw is going to
 // happen on this tick (rare for GPU copies in practice, since scheduling one also marks damage
 // non-empty - see lorieTryScheduleGpuCopy), so it has to take the lock and fence/unlock itself.
+bool Renderer::lockSharedState() {
+    int error = lorieLockShared(&state->lock, +[](void* context) {
+        auto* renderer = (Renderer*)context;
+        struct pollfd peer = {.fd = renderer->peerFd, .events = POLLIN | POLLRDHUP};
+        int result;
+        do { result = poll(&peer, 1, 0); } while (result < 0 && errno == EINTR);
+        return peer.fd >= 0 && result >= 0 &&
+                !(peer.revents & (POLLHUP | POLLRDHUP | POLLERR | POLLNVAL));
+    }, this);
+    if (!error) return true;
+    loge("X11 renderer buffer lock failed: %s", strerror(error));
+    connectionFailed = true;
+    if (peerFd >= 0) shutdown(peerFd, SHUT_RDWR);
+    return false;
+}
+
 void Renderer::applyPendingGpuCopies() {
     uint64_t serial;
-    if (!state || state->gpuCopyQueue.readIndex == state->gpuCopyQueue.writeIndex)
+    if (!state || connectionFailed || state->gpuCopyQueue.readIndex == state->gpuCopyQueue.writeIndex)
         return;
-    lorie_mutex_lock(&state->lock, &state->lockingPid);
+    if (!lockSharedState()) return;
     serial = applyPendingGpuCopiesLocked();
     if (serial) {
         EGLSync fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
@@ -678,7 +695,7 @@ void Renderer::applyPendingGpuCopies() {
         __atomic_store_n(&state->gpuCopyQueue.completedSerial, serial, __ATOMIC_RELEASE);
         notifyGpuCopyDone();
     }
-    lorie_mutex_unlock(&state->lock, &state->lockingPid);
+    pthread_mutex_unlock(&state->lock);
 }
 
 bool Renderer::shouldWait() {
@@ -686,7 +703,9 @@ bool Renderer::shouldWait() {
     bool buffersChanged = !xorg_list_is_empty(&addedBuffers) || !xorg_list_is_empty(&removedBuffers);
     pthread_spin_unlock(&bufferLock);
     bool gpuCopyPending = state && state->gpuCopyQueue.readIndex != state->gpuCopyQueue.writeIndex;
-    if (stateChanged || buffersChanged || gpuCopyPending || outputSurfacesChanged()) return false;
+    if (stateChanged || buffersChanged || outputSurfacesChanged()) return false;
+    if (connectionFailed) return true;
+    if (gpuCopyPending) return false;
     return !state || state->waitForNextFrame || !outputsNeedDraw();
 }
 
@@ -706,6 +725,7 @@ void Renderer::threadLoop() {
             if (oldState) oldState->surfaceAvailable = false;
 
             state = pendingState;
+            connectionFailed = false;
             pendingState = nullptr;
             stateChanged = false;
 

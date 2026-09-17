@@ -74,7 +74,12 @@ from the Android Binder bootstrap token.
 
 ### Native Transport and Lifetime
 
-The GUI command stream has one writer (the session handler thread). Renderer GPU
+The GUI command stream has one writer (the session handler thread). Commands
+use a bounded, nonblocking FIFO (1 MiB / 4096 messages), drained on socket
+writability. Headers and independently retained ancillary FDs preserve ordering
+through partial writes. Overflow or transport failure disconnects the session;
+commands are never silently discarded and the Looper never waits for a reader.
+Renderer GPU
 completion uses a separate, nonblocking `eventfd`, passed during connection setup
 and observed on the X server thread. It must never write into the command stream,
 including between a command header and its ancillary FD. The server unregisters
@@ -92,8 +97,21 @@ X server work has one FIFO across all producers. Callbacks execute outside its
 mutex; newly queued work and unsuccessful callbacks wait for the next pass.
 Zombie-client cleanup preserves the order of surviving work and is reentrant.
 
+The shared pixel mutex protects CPU/GPU access through GPU completion, not socket
+publication or `eglSwapBuffers`. Each caller supplies its own peer-liveness context;
+renderers must never consult the X server's process-global socket. Monotonic timed
+acquisition observes peer loss without imposing a GPU-operation deadline. A broken
+peer fails that session; a live or abandoned mutex is never reinitialized in place.
+EXA FinishAccess releases the acquisition recorded by PrepareAccess. The renderer
+snapshots output metadata under its local lock, then draws without holding it.
+Only the render thread replaces EGL surfaces or releases GL buffers, so snapshots
+retain their resources until the next iteration. Disconnect shuts down the socket
+before waiting for shared-state/Surface detachment, allowing lock waits to cancel.
+
 Run `sh scripts/verify-native.sh` on Linux or Termux. Portable tests cover queue
 ordering/reentrancy, GPU notification isolation and buffer layout/Present sizing.
+They also cover contended/recursive shared locks, peer death, command backpressure,
+partial writes and queued-FD lifetime.
 Termux additionally tests the actual buffer implementation with fragmented IPC,
 FD cleanup, nonzero offsets and injected AHardwareBuffer lock failures. These are
 native fixtures, independent of Android Desktop self-tests.

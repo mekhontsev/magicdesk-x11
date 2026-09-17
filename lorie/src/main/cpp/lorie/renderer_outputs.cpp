@@ -103,20 +103,43 @@ void Renderer::drawOutputs() {
     // All outputs of this session share the single upstream Present-queue consumer.
     applyPendingGpuCopies();
     pthread_mutex_lock(&stateLock);
-    if (state->waitForNextFrame) { pthread_mutex_unlock(&stateLock); return; }
-    bool rendered = false;
+    if (connectionFailed || state->waitForNextFrame) { pthread_mutex_unlock(&stateLock); return; }
+    struct Draw {
+        Draw* next;
+        uint32_t id;
+        EGLSurface surface;
+        ANativeWindow* window;
+        lorieEvent frame;
+        unsigned layerCount;
+        lorieEvent layers[];
+    };
+    Draw *draws = nullptr, **tail = &draws;
     for (Output* output = outputs; output; output = output->next) {
-        const auto& frame = output->frame.frame;
-        if (output->surface == EGL_NO_SURFACE || output->drawnRevision == frame.revision) continue;
-        lorie_mutex_lock(&state->lock, &state->lockingPid);
-        if (!eglMakeCurrent(egl_display, output->surface, output->surface, ctx)) {
-            output->drawnRevision = frame.revision;
-            lorie_mutex_unlock(&state->lock, &state->lockingPid);
+        if (output->surface == EGL_NO_SURFACE || output->drawnRevision == output->frame.frame.revision) continue;
+        auto* draw = (Draw*)malloc(sizeof(Draw) + output->layerCount * sizeof(lorieEvent));
+        if (!draw) continue;
+        draw->next = nullptr; draw->id = output->id;
+        draw->surface = output->surface; draw->window = output->window;
+        draw->frame = output->frame; draw->layerCount = output->layerCount;
+        memcpy(draw->layers, output->layers, output->layerCount * sizeof(lorieEvent));
+        *tail = draw; tail = &draw->next;
+    }
+    pthread_mutex_unlock(&stateLock);
+    // Only this renderer thread replaces EGL surfaces/windows and releases GL
+    // buffers, on the next loop iteration. The snapshot borrows those resources,
+    // not Output records (which the connection may release after acknowledgement).
+    bool rendered = false;
+    for (const Draw* item = draws; item; item = item->next) {
+        const Draw& draw = *item;
+        const auto& frame = draw.frame.frame;
+        if (!lockSharedState()) break;
+        if (!eglMakeCurrent(egl_display, draw.surface, draw.surface, ctx)) {
+            pthread_mutex_unlock(&state->lock);
             continue;
         }
         eglSwapInterval(egl_display, 0);
         glDisable(GL_SCISSOR_TEST);
-        int width = ANativeWindow_getWidth(output->window), height = ANativeWindow_getHeight(output->window);
+        int width = ANativeWindow_getWidth(draw.window), height = ANativeWindow_getHeight(draw.window);
         glViewport(0, 0, width, height);
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -128,8 +151,8 @@ void Renderer::drawOutputs() {
             glEnable(GL_SCISSOR_TEST);
             glScissor((int)((1.f - x) * width / 2), (int)((1.f - y) * height / 2),
                     (int)(x * width), (int)(y * height));
-            for (unsigned i = 0; i < output->layerCount; i++) {
-                const auto& layer = output->layers[i].layer;
+            for (unsigned i = 0; i < draw.layerCount; i++) {
+                const auto& layer = draw.layers[i].layer;
                 pthread_spin_lock(&bufferLock);
                 LorieBuffer* buffer = LorieBufferList_findById(&buffers, layer.bufferId);
                 pthread_spin_unlock(&bufferLock);
@@ -153,13 +176,16 @@ void Renderer::drawOutputs() {
             eglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER_KHR);
             eglDestroySyncKHR(egl_display, fence);
         } else glFinish();
-        lorie_mutex_unlock(&state->lock, &state->lockingPid);
-        eglSwapBuffers(egl_display, output->surface);
-        output->drawnRevision = frame.revision;
+        pthread_mutex_unlock(&state->lock);
+        eglSwapBuffers(egl_display, draw.surface);
+        pthread_mutex_lock(&stateLock);
+        for (Output* output = outputs; output; output = output->next)
+            if (output->id == draw.id) { output->drawnRevision = frame.revision; break; }
+        pthread_mutex_unlock(&stateLock);
         rendered = true;
         state->renderedFrames++;
     }
     eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx);
+    while (draws) { Draw* next = draws->next; free(draws); draws = next; }
     if (rendered) state->waitForNextFrame = true;
-    pthread_mutex_unlock(&stateLock);
 }

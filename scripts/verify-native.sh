@@ -6,6 +6,8 @@ work=$(mktemp -d)
 trap 'rm -rf -- "$work"' 0
 cc=${CC:-clang}
 cxx=${CXX:-clang++}
+android_target=
+if [ "$(uname -o)" = Android ]; then android_target=--target=aarch64-linux-android34; fi
 # Queue tests need pixman declarations only; no pixman code or version feature is used.
 sed 's/@PIXMAN_VERSION_[A-Z]*@/0/g' "$src/pixman/pixman/pixman-version.h.in" > "$work/pixman-version.h"
 "$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/buffer-layout-test.c" -o "$work/layout"
@@ -17,6 +19,10 @@ sed 's/@PIXMAN_VERSION_[A-Z]*@/0/g' "$src/pixman/pixman/pixman-version.h.in" > "
 timeout 15 "$work/layout"
 timeout 15 "$work/gpu"
 timeout 15 "$work/queue"
+"$cc" $android_target -std=c11 -O2 -Wall -Wextra -UNDEBUG -pthread "$root/examples/shared-lock-test.c" -o "$work/lock"
+"$cxx" -std=c++17 -O2 -Wall -Wextra -UNDEBUG "$root/examples/command-queue-test.cpp" -o "$work/commands"
+timeout 15 "$work/lock"
+timeout 15 "$work/commands"
 
 # Buffer ownership and AHardwareBuffer failure injection use Android's actual ABI.
 if [ "$(uname -o)" = Android ]; then
