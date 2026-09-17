@@ -6,7 +6,9 @@
 #pragma ide diagnostic ignored "readability-redundant-declaration"
 #define EGL_EGLEXT_PROTOTYPES
 #define GL_GLEXT_PROTOTYPES
+#ifndef __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 #define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
+#endif
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -16,6 +18,7 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
 #include <EGL/egl.h>
@@ -25,12 +28,14 @@
 #include <android/sharedmem.h>
 #include "list.h"
 #include "buffer.h"
+#include "buffer_layout.h"
+#include "socket_io.h"
 
 // libEGL exports this only since API 26, weak so the library still loads below that.
 __attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
 
 struct LorieBuffer {
-    int16_t refcount;
+    int refcount;
     LorieBuffer_Desc desc;
 
     int8_t locked;
@@ -40,6 +45,7 @@ struct LorieBuffer {
     int fd;
     size_t size;
     off_t offset;
+    void* mapping;
 
     GLuint id;
     EGLImage image;
@@ -106,8 +112,8 @@ int LorieBuffer_createRegion(char const* name, size_t size) {
 
     fd = memfd_create(name, MFD_CLOEXEC|MFD_ALLOW_SEALING);
     if (fd >= 0) {
-        ftruncate (fd, (off_t) size);
-        return fd;
+        if (ftruncate(fd, (off_t)size) == 0) return fd;
+        close(fd);
     }
 
     fd = open("/dev/ashmem", O_RDWR);
@@ -131,80 +137,85 @@ int LorieBuffer_createRegion(char const* name, size_t size) {
 }
 #pragma clang diagnostic pop
 
-static LorieBuffer* allocate(int32_t width, int32_t stride, int32_t height, int8_t format, int8_t type, AHardwareBuffer *buf, int fd, size_t size, off_t offset, bool takeFd) {
+static LorieBuffer* allocate(int32_t width, int32_t stride, int32_t height, int8_t format, int8_t type, AHardwareBuffer *buf, int fd, off_t offset, bool takeFd) {
     AHardwareBuffer_Desc desc = {0};
     static uint64_t id = 0;
-    bool acceptable = (format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM || format == AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM) && width > 0 && height > 0;
-    LorieBuffer b = { .desc = { .width = width, .stride = stride, .height = height, .format = format, .type = type, .buffer = buf, .id = id++ }, .fd = takeFd ? fd : dup(fd), .size = size, .offset = offset };
-
-    if (type != LORIEBUFFER_AHARDWAREBUFFER && !acceptable)
-        return NULL;
-
-    __sync_fetch_and_add(&b.refcount, 1);
+    LorieBuffer b = { .refcount = 1,
+        .desc = { .width = width, .stride = stride, .height = height, .format = format,
+                  .type = type, .buffer = buf, .id = __sync_fetch_and_add(&id, 1) },
+        .fd = takeFd ? fd : -1, .offset = offset };
+    size_t bytes;
+    if (type == LORIEBUFFER_AHARDWAREBUFFER) {
+        if (!buf) goto fail;
+        if (__builtin_available(android 26, *)) AHardwareBuffer_describe(buf, &desc);
+        if (desc.layers != 1 || desc.width > INT32_MAX || desc.height > INT32_MAX ||
+            desc.stride > INT32_MAX || desc.format > UINT8_MAX) goto fail;
+        b.desc.width = (int32_t)desc.width;
+        b.desc.height = (int32_t)desc.height;
+        b.desc.stride = (int32_t)desc.stride;
+        b.desc.format = desc.format;
+    }
+    if ((b.desc.format != AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM &&
+         b.desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM &&
+         b.desc.format != AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM) ||
+        !lorieBufferLayout(b.desc.width, b.desc.stride, b.desc.height, offset, &bytes)) goto fail;
 
     switch (type) {
         case LORIEBUFFER_REGULAR:
-            b.desc.data = calloc(1, stride * height * sizeof(uint32_t));
+            b.desc.data = calloc(1, bytes);
             if (!b.desc.data)
-                return NULL;
+                goto fail;
             break;
-        case LORIEBUFFER_FD:
-            if (b.fd < 0)
-                return NULL;
-
-            b.desc.data = mmap(NULL, b.size, PROT_READ|PROT_WRITE, MAP_SHARED, b.fd, b.offset);
-            if (b.desc.data == NULL || b.desc.data == MAP_FAILED) {
-                close(b.fd);
-                return NULL;
+        case LORIEBUFFER_FD: {
+            if (!takeFd) b.fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+            struct stat st;
+            if (b.fd < 0 || fstat(b.fd, &st)) goto fail;
+            uint64_t extent = st.st_size > 0 ? (uint64_t)st.st_size : 0;
+            if (!extent) {
+                int ashmemSize = ioctl(b.fd, ASHMEM_GET_SIZE, NULL);
+                if (ashmemSize > 0) extent = (uint64_t)ashmemSize;
             }
-            break;
-        case LORIEBUFFER_AHARDWAREBUFFER: {
-            if (!b.desc.buffer)
-                return NULL;
-
-            if (__builtin_available(android 26, *))
-                AHardwareBuffer_describe(b.desc.buffer, &desc);
-            b.desc.width = (int32_t) desc.width;
-            b.desc.height = (int32_t) desc.height;
-            b.desc.stride = (int32_t) desc.stride;
-            b.desc.format = desc.format;
+            if ((uint64_t)offset + bytes > extent) goto fail;
+            long page = sysconf(_SC_PAGE_SIZE);
+            if (page <= 0) goto fail;
+            size_t delta = (size_t)(offset % page);
+            if (bytes > SIZE_MAX - delta) goto fail;
+            b.size = bytes + delta;
+            b.mapping = mmap(NULL, b.size, PROT_READ|PROT_WRITE, MAP_SHARED, b.fd, offset - delta);
+            if (b.mapping == MAP_FAILED) { b.mapping = NULL; goto fail; }
+            b.desc.data = (char*)b.mapping + delta;
             break;
         }
-        default: return NULL;
+        case LORIEBUFFER_AHARDWAREBUFFER:
+            break;
+        default: goto fail;
     }
 
     LorieBuffer* buffer = calloc(1, sizeof(*buffer));
-    if (!buffer) {
-        switch (type) {
-            case LORIEBUFFER_REGULAR:
-                free(b.desc.data);
-                break;
-            case LORIEBUFFER_FD:
-                munmap(b.desc.data, b.size);
-                close(b.fd);
-                break;
-            case LORIEBUFFER_AHARDWAREBUFFER:
-                if (__builtin_available(android 26, *))
-                    AHardwareBuffer_release(b.desc.buffer);
-                break;
-            default: break;
-        }
-
-        return NULL;
-    }
+    if (!buffer) goto fail;
 
     *buffer = b;
     xorg_list_init(&buffer->link);
     return buffer;
+fail:
+    if (b.mapping) munmap(b.mapping, b.size);
+    if (b.fd >= 0) close(b.fd);
+    if (type == LORIEBUFFER_REGULAR) free(b.desc.data);
+    if (buf) {
+        if (__builtin_available(android 26, *)) AHardwareBuffer_release(buf);
+    }
+    return NULL;
 }
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_allocate(int32_t width, int32_t height, int8_t format, int8_t type) {
     int fd = -1;
     size_t size = 0;
     AHardwareBuffer *ahardwarebuffer = NULL;
+    if (!lorieBufferLayout(width, width, height, 0, &size) ||
+        size > SIZE_MAX - (size_t)sysconf(_SC_PAGE_SIZE)) return NULL;
 
     if (type == LORIEBUFFER_FD) {
-        size = alignToPage(width * height * sizeof(uint32_t));
+        size = alignToPage(size);
         fd = LorieBuffer_createRegion("LorieBuffer", size);
         if (fd < 0)
             return NULL;
@@ -218,15 +229,15 @@ __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_allocate(int32_t width, int32_t height,
             dprintf(2, "FATAL: failed to allocate AHardwareBuffer (width %d height %d format %d): error %d\n", width, height, format, err);
     }
 
-    return allocate(width, width, height, format, type, ahardwarebuffer, fd, size, 0, true);
+    return allocate(width, width, height, format, type, ahardwarebuffer, fd, 0, true);
 }
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapFileDescriptor(int32_t width, int32_t stride, int32_t height, int8_t format, int fd, off_t offset) {
-    return allocate(width, stride, height, format, LORIEBUFFER_FD, NULL, fd, stride * height * sizeof(uint32_t), offset, false);
+    return allocate(width, stride, height, format, LORIEBUFFER_FD, NULL, fd, offset, false);
 }
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapAHardwareBuffer(AHardwareBuffer* buffer) {
-    return allocate(0, 0, 0, 0, LORIEBUFFER_AHARDWAREBUFFER, buffer, -1, 0, 0, false);
+    return allocate(0, 0, 0, 0, LORIEBUFFER_AHARDWAREBUFFER, buffer, -1, 0, false);
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_t format) {
@@ -237,7 +248,8 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
         return;
 
     if (type == LORIEBUFFER_FD) {
-        size_t size = alignToPage(buffer->desc.stride * buffer->desc.height * sizeof(uint32_t));
+        size_t size;
+        if (!lorieBufferLayout(buffer->desc.width, buffer->desc.stride, buffer->desc.height, 0, &size)) return;
         int fd = LorieBuffer_createRegion("LorieBuffer", size);
         if (fd < 0)
             return;
@@ -255,6 +267,7 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
         buffer->fd = fd;
         buffer->size = size;
         buffer->offset = 0;
+        buffer->mapping = data;
         free(buffer->desc.data);
         buffer->desc.data = data;
 
@@ -274,10 +287,12 @@ __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_
             AHardwareBuffer_describe(b, &desc);
 
         if (__builtin_available(android 26, *)) {
-            if (AHardwareBuffer_lock(b, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &data) == 0) {
-                pixman_blt(buffer->desc.data, data, buffer->desc.stride, (int) desc.stride, 32, 32, 0, 0, 0, 0, buffer->desc.width, buffer->desc.height);
-                AHardwareBuffer_unlock(b, NULL);
+            if (AHardwareBuffer_lock(b, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &data) != 0) {
+                AHardwareBuffer_release(b);
+                return;
             }
+            pixman_blt(buffer->desc.data, data, buffer->desc.stride, (int) desc.stride, 32, 32, 0, 0, 0, 0, buffer->desc.width, buffer->desc.height);
+            AHardwareBuffer_unlock(b, NULL);
         }
 
         buffer->desc.type = type;
@@ -308,7 +323,7 @@ __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
             free(buffer->desc.data);
             break;
         case LORIEBUFFER_FD:
-            munmap(buffer->desc.data, buffer->size);
+            munmap(buffer->mapping, buffer->size);
             close(buffer->fd);
             break;
         case LORIEBUFFER_AHARDWAREBUFFER:
@@ -328,6 +343,7 @@ __LIBC_HIDDEN__ const LorieBuffer_Desc* LorieBuffer_description(LorieBuffer* buf
 
 __LIBC_HIDDEN__ int LorieBuffer_lock(LorieBuffer* buffer, void** out) {
     int ret = 0;
+    if (out) *out = NULL;
     if (!buffer)
         return ENODEV;
 
@@ -341,8 +357,13 @@ __LIBC_HIDDEN__ int LorieBuffer_lock(LorieBuffer* buffer, void** out) {
     if (buffer->desc.type == LORIEBUFFER_REGULAR || buffer->desc.type == LORIEBUFFER_FD)
         buffer->lockedData = buffer->desc.data;
     else if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
+        ret = ENOSYS;
         if (__builtin_available(android 26, *))
             ret = AHardwareBuffer_lock(buffer->desc.buffer, AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN, -1, NULL, &buffer->lockedData);
+    }
+    if (ret) {
+        buffer->lockedData = NULL;
+        return ret;
     }
 
     if (out)
@@ -374,75 +395,56 @@ __LIBC_HIDDEN__ int LorieBuffer_unlock(LorieBuffer* buffer) {
     return ret;
 }
 
-__LIBC_HIDDEN__ void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd) {
-    if (socketFd < 0 || !buffer)
-        return;
+/* Wire metadata never contains process-local pointers, references or GL state. */
+typedef struct {
+    uint64_t id, offset;
+    int32_t width, height, stride;
+    uint8_t format, type;
+    uint16_t reserved;
+} LorieBufferWire;
+_Static_assert(sizeof(LorieBufferWire) == 32, "buffer wire layout");
 
-    write(socketFd, buffer, sizeof(*buffer));
-    if (buffer->desc.type == LORIEBUFFER_FD)
-        ancil_send_fd(socketFd, buffer->fd);
-    else if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
-        if (__builtin_available(android 26, *))
-            AHardwareBuffer_sendHandleToUnixSocket(buffer->desc.buffer, socketFd);
-    }
+__LIBC_HIDDEN__ bool LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd) {
+    if (socketFd < 0 || !buffer || (buffer->desc.type != LORIEBUFFER_FD &&
+                                   buffer->desc.type != LORIEBUFFER_AHARDWAREBUFFER)) return false;
+    LorieBufferWire wire = { .id = buffer->desc.id, .offset = buffer->offset,
+        .width = buffer->desc.width, .height = buffer->desc.height, .stride = buffer->desc.stride,
+        .format = buffer->desc.format, .type = buffer->desc.type };
+    if (!lorieWriteFully(socketFd, &wire, sizeof(wire))) return false;
+    if (buffer->desc.type == LORIEBUFFER_FD) return ancil_send_fd(socketFd, buffer->fd) == 0;
+    if (__builtin_available(android 26, *))
+        return AHardwareBuffer_sendHandleToUnixSocket(buffer->desc.buffer, socketFd) == 0;
+    return false;
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuffer** outBuffer) {
-    LorieBuffer buffer = {0}, *ret = NULL;
-    // We should read buffer from socket despite outbuffer is NULL, otherwise we will get protocol error
-    if (socketFd < 0)
-        return;
-
-    // Reset process-specific data;
-    buffer.refcount = 0;
-    buffer.locked = false;
-    buffer.fd = -1;
-    buffer.lockedData = NULL;
-    __sync_fetch_and_add(&buffer.refcount, 1); // refcount is the first object in the struct
-
-    read(socketFd, &buffer, sizeof(buffer));
-    buffer.image = NULL; // Only for process-local use
-    if (buffer.desc.type == LORIEBUFFER_FD) {
-        size_t size = buffer.desc.stride * buffer.desc.height * sizeof(uint32_t);
-        buffer.fd = ancil_recv_fd(socketFd);
-        if (buffer.fd == -1) {
-            if (outBuffer)
-                *outBuffer = NULL;
+    LorieBufferWire wire;
+    LorieBuffer* buffer = NULL;
+    size_t bytes;
+    if (outBuffer) *outBuffer = NULL;
+    if (!lorieReadFully(socketFd, &wire, sizeof(wire)) || wire.reserved ||
+        !lorieBufferLayout(wire.width, wire.stride, wire.height, wire.offset, &bytes) ||
+        (uint64_t)(off_t)wire.offset != wire.offset) return;
+    if (wire.type == LORIEBUFFER_FD) {
+        int fd = ancil_recv_fd(socketFd);
+        if (fd < 0) return;
+        buffer = allocate(wire.width, wire.stride, wire.height, wire.format, wire.type,
+                          NULL, fd, (off_t)wire.offset, true);
+    } else if (wire.type == LORIEBUFFER_AHARDWAREBUFFER && wire.offset == 0) {
+        AHardwareBuffer* hardware = NULL;
+        if (__builtin_available(android 26, *)) {
+            if (AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &hardware) != 0) return;
+        }
+        buffer = LorieBuffer_wrapAHardwareBuffer(hardware);
+        if (buffer && (buffer->desc.width != wire.width || buffer->desc.height != wire.height ||
+                       buffer->desc.stride != wire.stride || buffer->desc.format != wire.format)) {
+            LorieBuffer_release(buffer);
             return;
         }
-
-        buffer.desc.data = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_SHARED, buffer.fd, 0);
-        if (buffer.desc.data == NULL || buffer.desc.data == MAP_FAILED) {
-            close(buffer.fd);
-            if (outBuffer)
-                *outBuffer = NULL;
-            return;
-        }
-    } else if (buffer.desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
-        if (__builtin_available(android 26, *))
-            AHardwareBuffer_recvHandleFromUnixSocket(socketFd, &buffer.desc.buffer);
     }
-
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "MemoryLeak"
-    if (outBuffer)
-        ret = calloc(1, sizeof(buffer));
-#pragma clang diagnostic pop
-    if (!ret) {
-        if (buffer.fd >= 0)
-            close(buffer.fd);
-        if (buffer.desc.buffer) {
-            if (__builtin_available(android 26, *))
-                AHardwareBuffer_release(buffer.desc.buffer);
-        }
-        if (outBuffer)
-            outBuffer = NULL;
-        return;
-    }
-
-    *ret = buffer;
-    xorg_list_init(&ret->link);
-    *outBuffer = ret;
+    if (buffer) buffer->desc.id = wire.id;
+    if (outBuffer) *outBuffer = buffer;
+    else LorieBuffer_release(buffer);
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
@@ -472,8 +474,14 @@ __LIBC_HIDDEN__ void LorieBuffer_bindTexture(LorieBuffer *buffer) {
         return;
 
     glBindTexture(GL_TEXTURE_2D, buffer->id);
-    if (buffer->desc.type == LORIEBUFFER_FD)
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, buffer->desc.stride, buffer->desc.height, buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA, GL_UNSIGNED_BYTE, buffer->desc.data);
+    if (buffer->desc.type == LORIEBUFFER_FD) {
+        int format = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA;
+        int rows = buffer->desc.height - 1;
+        if (rows) glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, buffer->desc.stride, rows,
+                                 format, GL_UNSIGNED_BYTE, buffer->desc.data);
+        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, rows, buffer->desc.width, 1, format, GL_UNSIGNED_BYTE,
+                       (char*)buffer->desc.data + (size_t)rows * buffer->desc.stride * 4);
+    }
 }
 
 __LIBC_HIDDEN__ unsigned int LorieBuffer_getGLTextureId(LorieBuffer *buffer) {
@@ -547,17 +555,19 @@ __LIBC_HIDDEN__ int ancil_send_fd(int sock, int fd) {
     ((int*) CMSG_DATA(cmsg))[0] = fd;
 #pragma clang diagnostic pop
 
-    return sendmsg(sock, &message_header, 0) >= 0 ? 0 : -1;
+    ssize_t result;
+    do { result = sendmsg(sock, &message_header, MSG_NOSIGNAL); } while (result < 0 && errno == EINTR);
+    return result == 1 ? 0 : -1;
 }
 
 __LIBC_HIDDEN__ int ancil_recv_fd(int sock) {
-    char nothing = '!';
+    char nothing = 0;
     struct iovec nothing_ptr = { .iov_base = &nothing, .iov_len = 1 };
 
-    struct {
+    union {
         struct cmsghdr align;
-        int fd[1];
-    } ancillary_data_buffer;
+        char data[CMSG_SPACE(sizeof(int) * 2)];
+    } ancillary_data_buffer = {0};
 
     struct msghdr message_header = {
             .msg_name = NULL,
@@ -566,19 +576,25 @@ __LIBC_HIDDEN__ int ancil_recv_fd(int sock) {
             .msg_iovlen = 1,
             .msg_flags = 0,
             .msg_control = &ancillary_data_buffer,
-            .msg_controllen = sizeof(struct cmsghdr) + sizeof(int)
+            .msg_controllen = sizeof(ancillary_data_buffer)
     };
 
-#pragma clang diagnostic push
-#pragma ide diagnostic ignored "NullDereference"
-    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message_header);
-    cmsg->cmsg_len = message_header.msg_controllen;
-    cmsg->cmsg_level = SOL_SOCKET;
-    cmsg->cmsg_type = SCM_RIGHTS;
-    ((int*) CMSG_DATA(cmsg))[0] = -1;
-#pragma clang diagnostic pop
-
-    if (recvmsg(sock, &message_header, 0) < 0) return -1;
-
-    return ((int*) CMSG_DATA(cmsg))[0];
+    ssize_t result;
+    do { result = recvmsg(sock, &message_header, MSG_CMSG_CLOEXEC); } while (result < 0 && errno == EINTR);
+    if (result < 0) return -1;
+    int received = -1, count = 0;
+    for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&message_header); cmsg; cmsg = CMSG_NXTHDR(&message_header, cmsg)) {
+        if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS || cmsg->cmsg_len < CMSG_LEN(0)) continue;
+        size_t num = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        int* fds = (int*)CMSG_DATA(cmsg);
+        for (size_t i = 0; i < num; ++i) {
+            if (count++ == 0) received = fds[i];
+            else close(fds[i]);
+        }
+    }
+    if (result != 1 || nothing != '!' || count != 1 || (message_header.msg_flags & MSG_CTRUNC)) {
+        if (received >= 0) close(received);
+        return -1;
+    }
+    return received;
 }

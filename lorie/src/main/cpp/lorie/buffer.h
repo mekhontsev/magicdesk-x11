@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <fcntl.h>
 #include <linux/ashmem.h>
 #include <android/hardware_buffer.h>
@@ -51,7 +52,7 @@ LorieBuffer* _Nullable LorieBuffer_allocate(int32_t width, int32_t height, int8_
 
 /**
  * Wraps given memory fragment file descriptor into LorieBuffer.
- * Takes ownership on the given file descriptor.
+ * Duplicates the given file descriptor; the caller retains ownership.
  *
  * @param width width of buffer.
  * @param height height of buffer.
@@ -104,7 +105,7 @@ STATIC_INLINE void LorieBuffer_acquire(LorieBuffer* _Nullable buffer) {
  */
 STATIC_INLINE void LorieBuffer_release(LorieBuffer* _Nullable buffer) {
     void __LorieBuffer_free(LorieBuffer* buffer);
-    if (buffer && __sync_fetch_and_sub((int16_t*) buffer, 1) == 1) // refcount is the first object in the struct
+    if (buffer && __sync_fetch_and_sub((int*) buffer, 1) == 1) // refcount is the first object in the struct
         __LorieBuffer_free(buffer);
 }
 
@@ -162,7 +163,7 @@ int LorieBuffer_unlock(LorieBuffer* _Nullable buffer);
  * @param buffer
  * @param socketFd
  */
-void LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd);
+bool LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socketFd);
 
 /**
  * Receive an AHardwareBuffer from an AF_UNIX socket.

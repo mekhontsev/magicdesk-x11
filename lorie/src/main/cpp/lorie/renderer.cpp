@@ -28,8 +28,10 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <sys/eventfd.h>
 #include "list.h"
 #include "lorie.h"
+#include "gpu_completion.h"
 
 // libEGL exports this only since API 26, weak so the library still loads below that.
 __attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
@@ -121,13 +123,10 @@ static const char vertexShaderSrc[] =
 static const char fragmentShaderSrc[] = FRAGMENT_SHADER();
 static const char fragmentShaderBgraSrc[] = FRAGMENT_SHADER(".bgra");
 
-// Notifies activity.cpp's end of the GUI<->X server socket immediately when a GPU copy batch
-// finishes, instead of it waiting for the next vblank-tick poll.
+// GPU completion must not interleave with headers/FDs on the GUI command socket
+// or block while the renderer holds shared state. eventfd coalesces notifications.
 void Renderer::notifyGpuCopyDone() const {
-    if (connFdPtr && *connFdPtr != -1) {
-        lorieEvent e = { .type = EVENT_GPU_COPY_DONE };
-        write(*connFdPtr, &e, sizeof(e));
-    }
+    if (!lorieNotifyGpuCompletion(gpuDoneFd)) loge("GPU completion notification failed: %s", strerror(errno));
 }
 
 void Renderer::bindTexture(GLuint id) const {
@@ -320,6 +319,8 @@ bool Renderer::init(JNIEnv* env, jobject view) {
 
     pthread_cond_init(&stateChangeFinishCond, nullptr);
     pthread_spin_init(&bufferLock, false);
+    gpuDoneFd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+    if (gpuDoneFd < 0) return false;
 
     stopping = false;
     initialized = false;
@@ -354,6 +355,8 @@ void Renderer::destroy() {
     thread = 0;
     munmap(stateCond, sizeof(pthread_cond_t));
     close(stateCondFd);
+    if (gpuDoneFd >= 0) close(gpuDoneFd);
+    gpuDoneFd = -1;
     stateCond = nullptr;
     stateCondFd = -1;
     pthread_cond_destroy(&stateChangeFinishCond);

@@ -153,7 +153,6 @@ LorieViewResources::LorieViewResources(JNIEnv *callerEnv, jobject view) {
     JavaVM* vm;
     destroyed = false;
     renderer.init(callerEnv, view);
-    renderer.connFdPtr = &connFd; // lets the renderer thread wake up a GPU copy waiter
 
     callerEnv->GetJavaVM(&vm);
     vm->AttachCurrentThread(&env, nullptr);
@@ -250,9 +249,10 @@ int LorieViewResources::xcallback(int fd, int events) {
                     break;
                 }
                 case EVENT_ADD_BUFFER: {
-                    static LorieBuffer* buffer = nullptr;
+                    LorieBuffer* buffer = nullptr;
                     const LorieBuffer_Desc* desc;
                     LorieBuffer_recvHandleFromUnixSocket(connFd, &buffer);
+                    if (!buffer) { connect(-1); return 0; }
                     desc = LorieBuffer_description(buffer);
                     log(INFO, "Received shared buffer width %d stride %d height %d format %d type %d id %llu", desc->width, desc->stride, desc->height, desc->format, desc->type, desc->id);
                     renderer.addBuffer(buffer);
@@ -297,8 +297,11 @@ void LorieViewResources::connect(jint fd) {
 
         // Give the X server our renderer wakeup cond var fd, resent on every reconnect.
         lorieEvent e = { .type = EVENT_RENDERER_WAKEUP_COND };
-        write(connFd, &e, sizeof(e));
-        ancil_send_fd(connFd, renderer.getWakeupCondFd());
+        if (send(connFd, &e, sizeof(e), MSG_NOSIGNAL) != sizeof(e) ||
+            ancil_send_fd(connFd, renderer.getWakeupCondFd()) < 0) { connect(-1); return; }
+        e.type = EVENT_GPU_DONE_FD;
+        if (send(connFd, &e, sizeof(e), MSG_NOSIGNAL) != sizeof(e) ||
+            ancil_send_fd(connFd, renderer.gpuDoneFd) < 0) { connect(-1); return; }
 
         log(DEBUG, "XCB connection is successfull");
     }

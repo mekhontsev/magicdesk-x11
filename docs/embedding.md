@@ -152,6 +152,34 @@ from the Android Binder bootstrap token.
 
 ## Window and Clipboard Contract
 
+### Native Transport and Lifetime
+
+The GUI command stream has one writer (the session handler thread). Renderer GPU
+completion uses a separate, nonblocking `eventfd`, passed during connection setup
+and observed on the X server thread. It must never write into the command stream,
+including between a command header and its ancillary FD. The server unregisters
+and closes its completion FD on disconnect, replacement and shutdown.
+
+Buffer transport carries fixed-width metadata and an FD or AHardwareBuffer handle,
+not a runtime `LorieBuffer` struct. The receiver owns fresh reference counts, locks,
+list links and GL objects. FD imports validate format, dimensions, stride, extent
+and overflow; pixel-aligned offsets need not be page-aligned. Mapping ownership is
+separate from the pixel pointer, and the last row need not include trailing padding.
+An incomplete or invalid buffer message terminates the connection, not a partial
+registration. Server and embedded library must be built from the same revision.
+
+X server work has one FIFO across all producers. Callbacks execute outside its
+mutex; newly queued work and unsuccessful callbacks wait for the next pass.
+Zombie-client cleanup preserves the order of surviving work and is reentrant.
+
+Run `sh scripts/verify-native.sh` on Linux or Termux. Portable tests cover queue
+ordering/reentrancy, GPU notification isolation and buffer layout/Present sizing.
+Termux additionally tests the actual buffer implementation with fragmented IPC,
+FD cleanup, nonzero offsets and injected AHardwareBuffer lock failures. These are
+native fixtures, independent of Android Desktop self-tests.
+
+### Window Discovery
+
 `onWindowsChanged` publishes complete immutable snapshots after reconciliation,
 never intermediate removals from a batch. Discovery follows X properties and
 screen/property callbacks, without polling. A newly discovered application

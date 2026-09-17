@@ -149,7 +149,6 @@ struct SessionConnection {
         disconnect(false);
         fd = incoming;
         if (fd < 0) return false;
-        renderer.connFdPtr = &fd;
         if (ALooper_addFd(ALooper_forThread(), fd, 0, ALOOPER_EVENT_INPUT | ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP,
                 +[](int, int events, void* data) { return ((SessionConnection*)data)->receive(events); }, this) < 0) {
             disconnect(false);
@@ -158,6 +157,12 @@ struct SessionConnection {
         lorieEvent event{.type = EVENT_RENDERER_WAKEUP_COND};
         if (send(fd, &event, sizeof(event), MSG_NOSIGNAL) != sizeof(event) ||
                 ancil_send_fd(fd, renderer.getWakeupCondFd()) < 0) {
+            disconnect(false);
+            return false;
+        }
+        event.type = EVENT_GPU_DONE_FD;
+        if (send(fd, &event, sizeof(event), MSG_NOSIGNAL) != sizeof(event) ||
+                ancil_send_fd(fd, renderer.gpuDoneFd) < 0) {
             disconnect(false);
             return false;
         }

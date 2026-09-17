@@ -58,6 +58,8 @@ jobs:
       - name: Corresponding source
         run: |
           git ls-files --recurse-submodules -z | tar --null --verbatim-files-from --files-from=- -czf "$RUNNER_TEMP/MagicDesk-X11-source.tar.gz"
+      - name: Native regression tests
+        run: sh scripts/verify-native.sh
       - name: Build and lint
         run: ./gradlew -p examples/android :embedded:assembleRelease :app:assembleDebug :app:lintDebug :embedded:lintDebug
       - uses: actions/upload-artifact@v7

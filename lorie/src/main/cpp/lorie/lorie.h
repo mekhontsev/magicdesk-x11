@@ -46,6 +46,7 @@ void lorieUnregisterBuffer(LorieBuffer* buffer);
 bool lorieConnectionAlive(void);
 extern bool lorieDebugEnabled; // Set in activity.cpp's startLogcat, only called when TERMUX_X11_DEBUG=1.
 void lorieSetRendererWakeupCond(int fd);
+void lorieSetGpuDoneFd(int fd);
 void lorieSetCursorVisible(Bool visible);
 void lorieSendSyncReply(uint32_t serial);
 void registerCmdEntryPointNatives(JNIEnv *env);
@@ -113,7 +114,7 @@ typedef enum {
     EVENT_CLIPBOARD_SEND,
     EVENT_WINDOW_FOCUS_CHANGED,
     EVENT_RENDERER_WAKEUP_COND,
-    EVENT_GPU_COPY_DONE,
+    EVENT_GPU_DONE_FD,
     EVENT_LOCK_KEYS_STATE,
     EVENT_SYNC,
     EVENT_SYNC_REPLY,
@@ -403,7 +404,7 @@ struct Renderer {
     uint64_t dstSizeLogCount = 0, srcSizeLogCount = 0;
     uint64_t lastRequestedBufferId = 0;
 
-    volatile int* connFdPtr = nullptr;
+    int gpuDoneFd = -1;
 
     bool init(JNIEnv* env, jobject thiz);
     void destroy();

@@ -33,6 +33,8 @@ extern "C" {
 #include <poll.h>
 #include "lorie.h"
 #include "window_icon.h"
+#include "gpu_completion.h"
+#include "socket_io.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
@@ -40,6 +42,24 @@ static int argc = 0;
 static char** argv = nullptr;
 __LIBC_HIDDEN__ volatile int conn_fd = -1;
 static std::atomic<uint64_t> dataConnection{0};
+static int gpuDoneFd = -1;
+
+// Registration, callbacks and teardown belong to the X server thread.
+void lorieSetGpuDoneFd(int fd) {
+    if (gpuDoneFd >= 0) {
+        RemoveNotifyFd(gpuDoneFd);
+        close(gpuDoneFd);
+    }
+    gpuDoneFd = fd;
+    if (fd < 0) return;
+    if (!SetNotifyFd(fd, +[](int eventFd, int ready, void*) {
+            if (ready & X_NOTIFY_ERROR) { lorieSetGpuDoneFd(-1); return; }
+            if (lorieConsumeGpuCompletion(eventFd)) lorieRecheckGpuCopies();
+        }, X_NOTIFY_READ, nullptr)) {
+        close(fd);
+        gpuDoneFd = -1;
+    }
+}
 extern DeviceIntPtr lorieMouse, lorieTouch, lorieKeyboard, loriePen, lorieEraser;
 extern ScreenPtr pScreenPtr;
 extern "C" int ucs2keysym(long ucs);
@@ -271,19 +291,21 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
 
     if (ready & X_NOTIFY_ERROR) {
         headerBytes = 0;
-        LorieBuffer* buf;
         InputThreadUnregisterDev(fd);
         close(fd);
         conn_fd = -1;
         lorieEnableClipboardSync(FALSE);
         uint64_t generation = ++dataConnection;
         QueueWorkProc(+[](__unused ClientPtr client, void* closure) -> Bool {
-            if (dataConnection.load() == (uint64_t)(uintptr_t)closure) lorieDataReset();
+            if (dataConnection.load() == (uint64_t)(uintptr_t)closure) {
+                lorieSetGpuDoneFd(-1);
+                lorieDataReset();
+                LorieBuffer* buf;
+                while ((buf = LorieBufferList_first(&registeredBuffers))) LorieBuffer_removeFromList(buf);
+            }
             return TRUE;
         }, nullptr, (void*)(uintptr_t)generation);
         lorieWakeServer();
-        while ((buf = LorieBufferList_first(&registeredBuffers)))
-            LorieBuffer_removeFromList(buf);
         return;
     }
 
@@ -484,14 +506,28 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
                     lorieSetRendererWakeupCond(wakeupFd);
                 break;
             }
-            case EVENT_GPU_COPY_DONE:
-                QueueWorkProc(+[](__unused ClientPtr pClient, __unused void *closure) -> Bool {
-                    // This must be done only on X server thread (touches present's internal vblank queue).
-                    lorieRecheckGpuCopies();
+            case EVENT_GPU_DONE_FD: {
+                struct Registration { int fd; uint64_t generation; };
+                int descriptor = ancil_recv_fd(fd);
+                if (descriptor < 0) { handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+                auto* request = (Registration*)malloc(sizeof(Registration));
+                if (!request) { close(descriptor); handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr); return; }
+                *request = {descriptor, dataConnection.load()};
+                if (!QueueWorkProc(+[](__unused ClientPtr, void *closure) -> Bool {
+                    auto* request = (Registration*)closure;
+                    if (request->generation == dataConnection.load()) lorieSetGpuDoneFd(request->fd);
+                    else close(request->fd);
+                    free(request);
                     return TRUE;
-                }, nullptr, nullptr);
+                }, nullptr, request)) {
+                    close(descriptor);
+                    free(request);
+                    handleLorieEvents(fd, X_NOTIFY_ERROR, nullptr);
+                    return;
+                }
                 lorieWakeServer();
                 break;
+            }
             case EVENT_SYNC: {
                 auto serial = (uintptr_t) e.sync.serial;
                 QueueWorkProc(+[](__unused ClientPtr pClient, void *closure) -> Bool {
@@ -527,14 +563,10 @@ void handleLorieEvents(int fd, __unused int ready, __unused void *ignored) {
 }
 
 static bool sendData(const void* data, size_t size) {
-    while (size && conn_fd != -1) {
-        ssize_t count = send(conn_fd, data, size, MSG_NOSIGNAL);
-        if (count < 0 && errno == EINTR) continue;
-        if (count <= 0) { shutdown(conn_fd, SHUT_RDWR); return false; }
-        data = (const char*)data + count;
-        size -= count;
-    }
-    return size == 0;
+    if (conn_fd < 0) return false;
+    if (lorieWriteFully(conn_fd, data, size)) return true;
+    shutdown(conn_fd, SHUT_RDWR);
+    return false;
 }
 
 void lorieSendClipboardData(const char* data) {
@@ -582,8 +614,8 @@ bool lorieConnectionAlive(void) {
 void lorieSendSharedServerState(int memfd) {
     if (conn_fd != -1) {
         lorieEvent e = { .type = EVENT_SHARED_SERVER_STATE };
-        write(conn_fd, &e, sizeof(e));
-        ancil_send_fd(conn_fd, memfd);
+        if (sendData(&e, sizeof(e)) && ancil_send_fd(conn_fd, memfd) < 0)
+            shutdown(conn_fd, SHUT_RDWR);
     }
 }
 
@@ -603,8 +635,10 @@ void lorieRegisterBuffer(LorieBuffer* buffer) {
 
     if (conn_fd != -1 && buffer) {
         lorieEvent e = { .type = EVENT_ADD_BUFFER };
-        write(conn_fd, &e, sizeof(e));
-        LorieBuffer_sendHandleToUnixSocket(buffer, conn_fd);
+        if (!sendData(&e, sizeof(e)) || !LorieBuffer_sendHandleToUnixSocket(buffer, conn_fd)) {
+            shutdown(conn_fd, SHUT_RDWR);
+            return;
+        }
         LorieBuffer_addToList(buffer, &registeredBuffers);
         const LorieBuffer_Desc* desc = LorieBuffer_description(buffer);
         log(INFO, "Sent shared buffer width %d stride %d height %d format %d type %d id %llu", desc->width, desc->stride, desc->height, desc->format, desc->type, desc->id);
@@ -641,6 +675,7 @@ static jobject getXConnection(JNIEnv *env, __unused jobject cls) {
             close(conn_fd);
         }
         ++dataConnection;
+        lorieSetGpuDoneFd(-1);
         lorieDataReset();
         lorieResetOutputs();
         headerBytes = 0;
