@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "window_role.h"
 
 typedef struct ANativeWindow ANativeWindow;
 
@@ -35,6 +36,7 @@ typedef struct {
     const char* title;
     const uint32_t* icon;
     bool mapped;
+    LorieWindowRole role;
     LorieWindowManagement management;
 } LorieWindowInfo;
 

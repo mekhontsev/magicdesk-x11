@@ -14,7 +14,6 @@
 
 #include <sys/eventfd.h>
 #include <sys/errno.h>
-#include <libxcvt/libxcvt.h>
 #include <X11/X.h>
 #include <X11/Xmd.h>
 #include <present.h>
@@ -41,6 +40,7 @@
 #include "buffer_layout.h"
 #include "window_model.h"
 #include "dma_copy.h"
+#include "screen_mode.h"
 
 #define DRM_FORMAT_MOD_LINEAR 0
 
@@ -331,7 +331,8 @@ static RRModePtr lorieCvt(int width, int height, int framerate) {
     xRRModeInfo modeinfo = {0};
     RRModePtr mode;
 
-    info = libxcvt_gen_mode_info(width, height, framerate, 0, 0);
+    info = lorieVirtualMode(width, height, framerate);
+    if (!info) return NULL;
 
     snprintf(name, sizeof name, "%dx%d", info->hdisplay, info->vdisplay);
     modeinfo.nameLength = strlen(name);
@@ -777,6 +778,7 @@ void lorieConfigureNotify(int width, int height, int framerate, size_t name_size
     if (output && width && height && (pScreen->width != width || pScreen->height != height || pvfb->root.framerate != framerate)) {
         CARD32 mmWidth, mmHeight;
         RRModePtr mode = lorieCvt(width, height, framerate);
+        if (!mode) return;
         mmWidth = ((double) (mode->mode.width)) * 25.4 / monitorResolution;
         mmHeight = ((double) (mode->mode.height)) * 25.4 / monitorResolution;
         RROutputSetModes(output, &mode, 1, 0);

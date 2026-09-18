@@ -76,6 +76,7 @@ struct LorieConnection {
             .title = header.windowInfo.title,
             .icon = header.windowInfo.hasIcon ? windowIcon : nullptr,
             .mapped = header.windowInfo.mapped != 0,
+            .role = (LorieWindowRole)header.windowInfo.role,
             .management = {.managed = header.windowInfo.hostManaged != 0,
                 .request = {.serial = header.windowInfo.fullscreenSerial, .fullscreen = header.windowInfo.fullscreenRequested != 0},
                 .actual = {.fullscreen = header.windowInfo.fullscreenActual != 0}}};

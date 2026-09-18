@@ -10,6 +10,8 @@
 #include <compint.h>
 #include "lorie.h"
 #include "window_model.h"
+#include "window_placement.h"
+#include "window_size.h"
 
 extern ScreenPtr pScreenPtr;
 extern DeviceIntPtr lorieMouse, lorieKeyboard;
@@ -31,6 +33,8 @@ typedef struct OutputSelection {
     XID window;
     Bool changed, seen, dead, resizePending, geometryPending, ownsSize;
     int width, height;
+    int contentWidth, contentHeight;
+    uint8_t keys[32], buttons;
     unsigned layerCount;
     lorieEvent layers[MAX_FAMILY_LAYERS];
     uint64_t revision;
@@ -39,14 +43,45 @@ typedef struct OutputSelection {
 static OutputSelection* selections;
 static WindowImage* images;
 
+static void outputKey(OutputSelection* output, int key, Bool down) {
+    uint8_t mask = 1u << (key % 8);
+    if (!!(output->keys[key / 8] & mask) == !!down) return;
+    if (down) output->keys[key / 8] |= mask;
+    else output->keys[key / 8] &= ~mask;
+    for (OutputSelection* other = selections; other; other = other->next)
+        if (other != output && (other->keys[key / 8] & mask)) return;
+    QueueKeyboardEvents(lorieKeyboard, down ? KeyPress : KeyRelease, key);
+}
+
+static void outputButton(OutputSelection* output, int button, Bool down) {
+    uint8_t mask = 1u << button;
+    if (!!(output->buttons & mask) == !!down) return;
+    if (down) output->buttons |= mask;
+    else output->buttons &= ~mask;
+    for (OutputSelection* other = selections; other; other = other->next)
+        if (other != output && (other->buttons & mask)) return;
+    QueuePointerEvents(lorieMouse, down ? ButtonPress : ButtonRelease, button, POINTER_RELATIVE, NULL);
+}
+
+static void releaseInput(OutputSelection* output) {
+    // A destroyed client cannot receive the host's later key/button-up. Release
+    // this output's leases now, without releasing a key still held by another view.
+    for (int key = 8; key <= 255; key++) outputKey(output, key, FALSE);
+    for (int button = 1; button <= 7; button++) outputButton(output, button, FALSE);
+}
+
+void lorieReleaseOutputInput(void) {
+    for (OutputSelection* output = selections; output; output = output->next) releaseInput(output);
+}
+
 Bool lorieOutputPoint(uint32_t id, uint32_t xid, int x, int y, WindowPtr* selected, int* rootX, int* rootY) {
     for (OutputSelection* output = selections; output; output = output->next) {
         if (output->id != id || output->window != xid || output->dead) continue;
         WindowPtr window = pScreenPtr->root;
         if (xid && dixLookupWindow(&window, xid, serverClient, DixReadAccess) != Success) return FALSE;
         *selected = window;
-        *rootX = window->drawable.x + max(0, min(x, 10000)) * (window->drawable.width - 1) / 10000;
-        *rootY = window->drawable.y + max(0, min(y, 10000)) * (window->drawable.height - 1) / 10000;
+        *rootX = lorieOutputAxis(x, window->drawable.x, output->contentWidth);
+        *rootY = lorieOutputAxis(y, window->drawable.y, output->contentHeight);
         return TRUE;
     }
     return FALSE;
@@ -60,7 +95,11 @@ void lorieOutputGeometryChanged(void) {
 void lorieOutputWindowDestroyed(XID id) {
     // Output ownership ends with the resource, even when its XID is immediately reused.
     for (OutputSelection* output = selections; output; output = output->next)
-        if (output->window == id) { output->dead = TRUE; output->changed = TRUE; }
+        if (output->window == id) {
+            releaseInput(output);
+            output->dead = TRUE;
+            output->changed = TRUE;
+        }
     for (WindowImage* image = images; image; image = image->next)
         if (image->window == id) image->redirected = FALSE;
 }
@@ -73,6 +112,7 @@ static void damageDestroyed(__unused DamagePtr damage, void* closure) {
 }
 
 static void releaseSelection(OutputSelection* output) {
+    releaseInput(output);
     if (output->ownsSize) for (OutputSelection* other = selections; other; other = other->next) {
         if (other != output && !other->dead && other->window == output->window && other->width > 0) {
             other->ownsSize = TRUE;
@@ -145,7 +185,7 @@ void lorieOutputCommand(const lorieEvent* event) {
     if (!output || output->dead || output->window != event->output.window) return;
     if (event->output.operation == LORIE_OUTPUT_RESIZE) {
         if (event->output.x < 1 || event->output.y < 1 ||
-                event->output.x > 16384 || event->output.y > 16384) return;
+                event->output.x > LORIE_WINDOW_SIZE_LIMIT || event->output.y > LORIE_WINDOW_SIZE_LIMIT) return;
         output->width = event->output.x;
         output->height = event->output.y;
         // Multiple views of one XID may differ in size. Only the latest resize
@@ -166,17 +206,16 @@ void lorieOutputCommand(const lorieEvent* event) {
         lorieDataPointer(output->id, output->window, event->output.detail, event->output.down);
         ValuatorMask mask;
         valuator_mask_zero(&mask);
-        int x = max(0, min(event->output.x, 10000)) * (window->drawable.width - 1) / 10000;
-        int y = max(0, min(event->output.y, 10000)) * (window->drawable.height - 1) / 10000;
-        valuator_mask_set_double(&mask, 0, window->drawable.x + x);
-        valuator_mask_set_double(&mask, 1, window->drawable.y + y);
+        int x, y;
+        if (!lorieOutputPoint(output->id, output->window, event->output.x, event->output.y, &window, &x, &y)) return;
+        valuator_mask_set_double(&mask, 0, x);
+        valuator_mask_set_double(&mask, 1, y);
         QueuePointerEvents(lorieMouse, MotionNotify, 0, POINTER_ABSOLUTE | POINTER_SCREEN | POINTER_NORAW, &mask);
         if (event->output.detail >= 1 && event->output.detail <= 7)
-            QueuePointerEvents(lorieMouse, event->output.down ? ButtonPress : ButtonRelease,
-                    event->output.detail, POINTER_RELATIVE, NULL);
+            outputButton(output, event->output.detail, event->output.down);
     } else if (event->output.operation == LORIE_OUTPUT_KEY &&
             event->output.detail >= 8 && event->output.detail <= 255) {
-        QueueKeyboardEvents(lorieKeyboard, event->output.down ? KeyPress : KeyRelease, event->output.detail);
+        outputKey(output, event->output.detail, event->output.down);
     } else if (event->output.operation == LORIE_OUTPUT_TEXT) {
         int keysym = ucs2keysym(event->output.x);
         lorieKeysymKeyboardEvent(keysym, TRUE);
@@ -184,43 +223,66 @@ void lorieOutputCommand(const lorieEvent* event) {
     }
 }
 
+static void moveContent(WindowPtr window, int x, int y) {
+    if (x == window->drawable.x && y == window->drawable.y) return;
+    WindowPtr top = window;
+    while (top->parent && top->parent != pScreenPtr->root) top = top->parent;
+    XID position[] = {(XID)(top->origin.x - top->borderWidth + x - window->drawable.x),
+            (XID)(top->origin.y - top->borderWidth + y - window->drawable.y)};
+    ConfigureWindow(top, CWX | CWY, position, serverClient);
+}
+
+typedef struct {
+    WindowPtr owner;
+    int right, bottom;
+    unsigned count;
+} FamilyPlacement;
+
+static void placeTransient(WindowPtr window, void* closure) {
+    FamilyPlacement* placement = closure;
+    if (placement->count++ >= MAX_FAMILY_LAYERS || window == placement->owner) return;
+    WindowPtr owner = placement->owner;
+    int x = loriePlaceTransientAxis(window->drawable.x, window->drawable.width,
+            owner->drawable.x, owner->drawable.width);
+    int y = loriePlaceTransientAxis(window->drawable.y, window->drawable.height,
+            owner->drawable.y, owner->drawable.height);
+    moveContent(window, x, y);
+    placement->right = max(placement->right, x + window->drawable.width);
+    placement->bottom = max(placement->bottom, y + window->drawable.height);
+}
+
 void loriePrepareOutputs(void) {
     if (!pScreenPtr || !pScreenPtr->root) return;
     for (OutputSelection* output = selections; output; output = output->next) {
         if ((!output->resizePending && !output->geometryPending) || output->dead) continue;
+        Bool resize = output->resizePending;
+        output->resizePending = output->geometryPending = FALSE;
         WindowPtr window = pScreenPtr->root;
         if (output->window && dixLookupWindow(&window, output->window,
                 serverClient, DixWriteAccess) != Success) continue;
         if (!output->window) {
-            if (output->resizePending) lorieConfigureNotify(output->width, output->height, 60, 0, NULL);
+            if (resize) lorieConfigureNotify(output->width, output->height, 60, 0, NULL);
         } else {
-            // An individual output is hosted by an Android window. Retain its last
-            // Surface size when the client subsequently requests its saved geometry.
+            // The size owner proposes its Surface size; the X client keeps its
+            // declared limits. Rendering and input aspect-fit the resulting canvas.
             int width = output->ownsSize ? output->width : window->drawable.width;
             int height = output->ownsSize ? output->height : window->drawable.height;
+            if (output->ownsSize) lorieWindowConstrainSize(window, &width, &height);
             int x = max(0, window->drawable.x), y = max(0, window->drawable.y);
             // Composite can expose off-screen pixels, but X input is clipped to the root.
             // Move the containing top-level (including any WM frame), not its child content.
-            WindowPtr top = window;
-            while (top->parent && top->parent != pScreenPtr->root) top = top->parent;
-            if (x != window->drawable.x || y != window->drawable.y) {
-                XID position[] = {
-                    (XID)(top->origin.x - top->borderWidth + x - window->drawable.x),
-                    (XID)(top->origin.y - top->borderWidth + y - window->drawable.y)
-                };
-                ConfigureWindow(top, CWX | CWY, position, serverClient);
-            }
-            int screenWidth = max(pScreenPtr->width, x + width);
-            int screenHeight = max(pScreenPtr->height, y + height);
-            if (screenWidth != pScreenPtr->width || screenHeight != pScreenPtr->height)
-                lorieConfigureNotify(screenWidth, screenHeight, 60, 0, NULL);
+            moveContent(window, x, y);
             if (width != window->drawable.width || height != window->drawable.height) {
                 XID size[] = {(XID)width, (XID)height};
                 ConfigureWindow(window, CWWidth | CWHeight, size, serverClient);
             }
+            FamilyPlacement placement = {.owner = window, .right = x + width, .bottom = y + height};
+            lorieWindowFamily(window, placeTransient, &placement);
+            int screenWidth = max(pScreenPtr->width, placement.right);
+            int screenHeight = max(pScreenPtr->height, placement.bottom);
+            if (screenWidth != pScreenPtr->width || screenHeight != pScreenPtr->height)
+                lorieConfigureNotify(screenWidth, screenHeight, 60, 0, NULL);
         }
-        output->resizePending = FALSE;
-        output->geometryPending = FALSE;
     }
 }
 
@@ -299,6 +361,16 @@ void loriePublishOutputs(struct lorie_shared_server_state* state) {
         memcpy(output->layers, frame.layers, frame.count * sizeof(lorieEvent));
         lorieEvent event = {.frame = {.t = EVENT_OUTPUT_FRAME, .output = output->id,
                 .window = output->window, .revision = ++output->revision}};
+        if (frame.count) {
+            event.frame.width = window->drawable.width;
+            event.frame.height = window->drawable.height;
+            for (unsigned i = 0; i < frame.count; i++) {
+                event.frame.width = max((int)event.frame.width, frame.layers[i].layer.x + (int)frame.layers[i].layer.width);
+                event.frame.height = max((int)event.frame.height, frame.layers[i].layer.y + (int)frame.layers[i].layer.height);
+            }
+        }
+        output->contentWidth = event.frame.width;
+        output->contentHeight = event.frame.height;
         LorieBuffer* buffers[MAX_FAMILY_LAYERS] = {0};
         lorieServerLock(&state->lock);
         for (unsigned i = 0; i < frame.count; i++)
@@ -314,8 +386,6 @@ void loriePublishOutputs(struct lorie_shared_server_state* state) {
             lorieSendOutputFrame(&frame.layers[i]);
             if (frame.layers[i].layer.window == window->drawable.id) {
                 event.frame.bufferId = frame.layers[i].layer.bufferId;
-                event.frame.width = window->drawable.width;
-                event.frame.height = window->drawable.height;
             }
         }
         // Commit the complete family atomically: no intermediate main-only frame.

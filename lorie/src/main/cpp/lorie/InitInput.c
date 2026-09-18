@@ -295,5 +295,7 @@ InitInput(__unused int argc, __unused char *argv[]) {
 
 void
 CloseInput(void) {
+    // Screen teardown follows input/device teardown; no output may retain a key then.
+    lorieReleaseOutputInput();
     mieqFini();
 }

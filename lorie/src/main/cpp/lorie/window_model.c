@@ -5,6 +5,7 @@
 #include <property.h>
 #include <propertyst.h>
 #include <inputstr.h>
+#include <inpututils.h>
 #include <dix.h>
 #include <selection.h>
 #include <xacestr.h>
@@ -12,6 +13,9 @@
 #include "window_model.h"
 #include "window_icon.h"
 #include "fullscreen_state.h"
+#include "window_role.h"
+#include "window_size.h"
+#include "window_family.h"
 
 extern ScreenPtr pScreenPtr;
 extern DeviceIntPtr lorieKeyboard;
@@ -23,6 +27,7 @@ typedef struct WindowRecord {
     LorieFullscreenState fullscreen;
     char title[256];
     Bool hasIcon;
+    LorieWindowRole role;
     uint32_t icon[LORIE_WINDOW_ICON_PIXELS];
 } WindowRecord;
 
@@ -56,6 +61,15 @@ static XID reference(WindowPtr window, const char* name) {
             ? *(CARD32*)value->data : None;
 }
 
+void lorieWindowConstrainSize(WindowPtr window, int* width, int* height) {
+    PropertyPtr hints = property(window, "WM_NORMAL_HINTS");
+    Bool valid = hints && hints->type == XA_WM_SIZE_HINTS && hints->format == 32;
+    const uint32_t* values = valid ? hints->data : NULL;
+    size_t count = valid ? hints->size : 0;
+    *width = lorieWindowSizeAxis(*width, values, count, 0);
+    *height = lorieWindowSizeAxis(*height, values, count, 1);
+}
+
 static Bool hasAtom(WindowPtr window, const char* name, const char* item) {
     PropertyPtr value = property(window, name);
     if (!value || value->type != XA_ATOM || value->format != 32) return FALSE;
@@ -69,15 +83,12 @@ static WindowPtr lookup(XID id) {
     return id && dixLookupWindow(&window, id, serverClient, DixReadAccess) == Success ? window : NULL;
 }
 
+static WindowPtr transientFor(WindowPtr window) {
+    return lookup(reference(window, "WM_TRANSIENT_FOR"));
+}
+
 Bool lorieWindowBelongsTo(WindowPtr window, WindowPtr owner) {
-    // Transient chains are client-controlled: reject cycles with a bounded walk.
-    for (int depth = 0; window && depth < 64; depth++) {
-        if (window == owner) return TRUE;
-        XID parent = reference(window, "WM_TRANSIENT_FOR");
-        if (!parent || parent == window->drawable.id || parent == pScreenPtr->root->drawable.id) return FALSE;
-        window = lookup(parent);
-    }
-    return FALSE;
+    return lorieWindowFamilyContains(window, owner, pScreenPtr->root, transientFor);
 }
 
 static Bool familyMember(WindowPtr window, WindowPtr owner) {
@@ -88,7 +99,8 @@ static Bool familyMember(WindowPtr window, WindowPtr owner) {
     if (!window->overrideRedirect && !hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_MODAL")) return FALSE;
     XID group = reference(window, "WM_CLIENT_LEADER");
     if (!group || group != reference(owner, "WM_CLIENT_LEADER")) return FALSE;
-    WindowPtr focus = lorieKeyboard->focus ? lorieKeyboard->focus->win : NULL;
+    DeviceIntPtr keyboard = GetMaster(lorieKeyboard, KEYBOARD_OR_FLOAT);
+    WindowPtr focus = keyboard->focus ? keyboard->focus->win : NULL;
     return focus && focus != PointerRootWin && focus != NoneWin && lorieWindowBelongsTo(focus, owner);
 }
 
@@ -109,8 +121,8 @@ static Bool isApplication(WindowPtr window) {
     if (window == pScreenPtr->root || window->drawable.class != InputOutput || window->overrideRedirect
             || reference(window, "WM_TRANSIENT_FOR")) return FALSE;
     if (hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DESKTOP")
-            || hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DOCK")
-            || hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_SPLASH")) return FALSE;
+            || hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DOCK")) return FALSE;
+    if (hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_SPLASH")) return TRUE;
     if (property(window, "WM_STATE")) return TRUE;
     return window->parent == pScreenPtr->root && (property(window, "WM_CLASS")
             || property(window, "WM_NAME") || property(window, "_NET_WM_NAME"));
@@ -146,14 +158,18 @@ static void publishWindow(WindowPtr window) {
     value = property(window, "_NET_WM_ICON");
     Bool hasIcon = lorieWindowIcon(value && value->type == XA_CARDINAL && value->format == 32
             ? value->data : NULL, value ? value->size : 0, icon);
+    LorieWindowRole role = lorieWindowRole(hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_SPLASH"),
+            property(window, "_NET_WM_WINDOW_TYPE") != NULL, property(window, "WM_CLASS") != NULL,
+            property(window, "WM_STATE") != NULL);
     if (!record->published || record->changed || record->mapped != window->realized || strcmp(record->title, title)
-            || record->hasIcon != hasIcon || memcmp(record->icon, icon, sizeof(icon))) {
+            || record->role != role || record->hasIcon != hasIcon || memcmp(record->icon, icon, sizeof(icon))) {
         record->mapped = window->realized;
         memcpy(record->title, title, sizeof(title));
         record->hasIcon = hasIcon;
+        record->role = role;
         memcpy(record->icon, icon, sizeof(icon));
         lorieEvent event = {.windowInfo = {.t = EVENT_OUTPUT_WINDOW, .mapped = record->mapped,
-                .window = record->id, .hasIcon = hasIcon, .hostManaged = managerWindow != None,
+                .window = record->id, .hasIcon = hasIcon, .role = role, .hostManaged = managerWindow != None,
                 .fullscreenSerial = record->fullscreen.serial,
                 .fullscreenRequested = record->fullscreen.requested,
                 .fullscreenActual = record->fullscreen.actual}};
@@ -342,8 +358,10 @@ void lorieWindowClose(XID id) {
 void lorieWindowFocus(WindowPtr window) {
     if (!window || !window->realized) return;
     // Do not break toolkit popup grabs or replace a dialog's keyboard focus with its parent.
-    if (lorieKeyboard->deviceGrab.grab) return;
-    WindowPtr focus = lorieKeyboard->focus ? lorieKeyboard->focus->win : NULL;
+    // Core X clients focus the master keyboard; the injection slave's focus can be stale.
+    DeviceIntPtr keyboard = GetMaster(lorieKeyboard, KEYBOARD_OR_FLOAT);
+    if (keyboard->deviceGrab.grab || lorieKeyboard->deviceGrab.grab) return;
+    WindowPtr focus = keyboard->focus ? keyboard->focus->win : NULL;
     if (focus && focus != PointerRootWin && focus != NoneWin && lorieWindowBelongsTo(focus, window)) return;
     WindowPtr stack = window;
     while (stack->parent && stack->parent != pScreenPtr->root) stack = stack->parent;
@@ -352,14 +370,18 @@ void lorieWindowFocus(WindowPtr window) {
     PropertyPtr hints = property(window, "WM_HINTS");
     Bool accepts = !hints || hints->format != 32 || hints->size < 2
             || !(((CARD32*)hints->data)[0] & 1) || ((CARD32*)hints->data)[1];
-    if (accepts) SetInputFocus(serverClient, lorieKeyboard, window->drawable.id, RevertToParent, CurrentTime, FALSE);
+    if (accepts) SetInputFocus(serverClient, keyboard, window->drawable.id, RevertToParent, CurrentTime, FALSE);
     if (hasAtom(window, "WM_PROTOCOLS", "WM_TAKE_FOCUS")) clientMessage(window, "WM_TAKE_FOCUS");
 }
 
-static void propertyChanged(CallbackListPtr* list, void* closure, void* data) { dirty = TRUE; }
+static void propertyChanged(CallbackListPtr* list, void* closure, void* data) {
+    dirty = TRUE;
+    lorieOutputGeometryChanged();
+}
 #define WINDOW_HOOK(name, member, saved) \
     static Bool name(WindowPtr w) { \
         dirty = TRUE; \
+        lorieOutputGeometryChanged(); \
         ScreenPtr screen = w->drawable.pScreen; \
         screen->member = saved; \
         Bool result = screen->member(w); \

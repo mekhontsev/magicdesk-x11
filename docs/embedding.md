@@ -156,8 +156,11 @@ never intermediate removals from a batch. Discovery follows X properties and
 screen/property callbacks, without polling. A newly discovered application
 must have been mapped at least once. Unmapped known clients remain in the
 catalog until their resource is destroyed or ceases to be an application.
-Desktop, dock, splash, override-redirect and explicitly transient windows are
-excluded from the application catalog. Titles are bounded to 255 UTF-8 bytes.
+Desktop, dock, override-redirect and explicitly transient windows are excluded
+from the catalog. Each entry carries an application/splash/unclassified role:
+explicit SPLASH is retained for startup presentation; absent type, WM_CLASS and
+WM_STATE remain unclassified, not guessed from executable names. The host owns
+startup handoff and session lifetime. Titles are bounded to 255 UTF-8 bytes.
 
 An individual output composites its main pixmap and the mapped transient
 family, back to front, with premultiplied alpha for depth-32 layers. Group
@@ -166,13 +169,41 @@ transients/unparented popups follow the focused member only when their
 cycles. Ordinary children remain part of their parent pixmap. The server
 shares Composite/Damage ownership for repeated XIDs; each output's layers
 and frame arrive as one committed presentation. Families are bounded to 256
-layers and clipped to the main viewport.
+layers. Individual-output geometry reconciliation constrains transients to the
+owner's bounds without resizing toolkit-owned content. Larger dialogs extend the
+family canvas, which is aspect-fitted by the existing renderer. Frame dimensions,
+pointer and drag mapping use the same canvas, returning to the main size when
+transients disappear. Whole-screen outputs do not reposition transients.
+
+Virtual RandR modes preserve the exact requested pixel dimensions. CVT supplies
+timings only: its physical-scanout width rounding must not shrink the root below
+the family canvas and trigger repeated resize/repaint cycles. The shared mode
+adapter is used at startup and for later screen changes. `screen-mode-test.c`
+covers non-aligned widths, CVT's 1366x768 special case and the 3372-pixel dialog
+regression against the actual bundled CVT implementation.
 
 `lorieOutputFocus` preserves active keyboard grabs and existing dialog focus,
-otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`. `lorieCloseWindow` sends
+otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`.
+Focus-family membership includes actual X children as well as transient links:
+toolkits can focus a hidden child inside a modal dialog. Raising the main window
+in response to that valid focus would bury the dialog and block visible input.
+The allocation-free traversal checks real ancestors first, follows their nearest
+transient link, and bounds both kinds of links against malformed client chains.
+`window-family-test.c` covers focus children, nested transients, WM frames,
+unrelated windows and cycles. The family fixture focuses a hidden child inside
+each popup, so its click must reach the popup without raising the main window.
+
+`lorieCloseWindow` sends
 `WM_DELETE_WINDOW`, falling back to X client termination if unsupported.
 Output destruction itself still releases only a presentation. The host
 decides when to close clients and retained/application sessions.
+Each output owns its pressed keys/buttons. Destruction of its selected window,
+rebinding, release or disconnect releases those input leases; a late key-up must
+not leave the shared keyboard repeating after a startup-window handoff. Other
+views' held keys remain owned until those views release them.
+Focus and group-transient association use the injection keyboard's effective
+master, matching core X clients; the slave's stale focus is not an application
+focus observation. Whole-screen outputs retain their window manager's focus.
 
 The host enables exchange and publishes native data offers through `lorieConnectionData`.
 Descriptors are independently owned by the receiving callback. Clipboard and XDND have separate selections,
@@ -195,8 +226,7 @@ or invoke a privileged file service.
 The host owns Android task placement, application discovery, IME and session
 lifecycle. It must not conflate an Android display ID, output ID and XID. Only
 one owner should request whole-screen geometry when multiple outputs select
-XID zero. Custom X cursor presentation and out-of-viewport popup placement
-remain host integration work.
+XID zero. Custom X cursor presentation remains host integration work.
 
 `examples/content-window.c` is a GTK clipboard/XDND fixture for text, HTML, PNG
 and files, including a 700,000-byte INCR text selection. Build it with
@@ -213,8 +243,16 @@ root's input area, moving the containing top-level frame when necessary, and
 the root grows to contain positive extents. Composite pixels and pointer hit
 testing therefore refer to reachable X coordinates. XID-zero outputs do not
 reposition clients; a whole Linux desktop retains its own window manager.
-An individual XID keeps the last size requested by its Android Surface even
-after client ConfigureWindow requests. If several outputs select the same XID,
+An individual XID constrains the last size requested by its Android Surface to
+`WM_NORMAL_HINTS` `PMinSize`/`PMaxSize`, even after client ConfigureWindow requests.
+The window model decodes CARD32 properties and the allocation-free size policy
+validates each axis against the native geometry limit. Malformed or contradictory
+limits are ignored; missing hints retain Surface-sized behavior. Fixed-size
+windows keep their declared dimensions and are centered/aspect-fitted by the
+existing renderer, rather than enlarging their background pixmap into a tiled
+surface. Property changes reuse geometry reconciliation without a host resize.
+Resize increments, base-size and aspect-ratio hints are not currently applied.
+If several outputs select the same XID,
 only the most recently resized output owns its size; other outputs fit the
 result with preserved aspect ratio. Releasing that owner transfers size control
 to a remaining sized output. This is event-driven reconciliation, not polling.
@@ -228,6 +266,26 @@ Also request a different client size and verify it returns to the hosted size;
 repeat with two outputs and release the size owner to check there is no resize
 feedback loop. The fixture publishes a four-color `_NET_WM_ICON` for verifying
 Android task presentation independently of an installed application's icons.
+
+`examples/family-window.c` is an event-driven startup/dialog/menu fixture. Build
+with `clang examples/family-window.c -o family-window -lxcb`. With argument
+`splash` it declares SPLASH; without it startup content is unclassified. Enter
+replaces startup with a normal window in the same Android host; F1 opens an
+oversized dialog and F2 a menu beyond the lower-right edge. Clicking the popup
+logs its local coordinates and closes it. Verify the whole popup is visible,
+that clicks reach its far edge, the parent returns to its original scale, and
+Enter does not autorepeat after its original X window is destroyed.
+Argument `gap` creates the main window unmapped and destroys startup content;
+use `control-window XID map` for the logged main XID to verify an empty-catalog
+handoff without a timer. `control-window XID info` reports geometry, size hints,
+core keyboard focus and held keys for input verification.
+Argument `fixed` adds 500x300 minimum/maximum hints and a tiled background with
+two markers. The old forced-resize path repeats those markers across the host;
+the constrained path shows exactly two, with X geometry remaining 500x300.
+F3 removes the hints and F4 restores them before handoff. Verify both changes
+without resizing Android, then Enter must still reach the unconstrained main
+window in the same host. `window-size-test.c` covers fixed, one-sided, absent,
+truncated, invalid and contradictory limits without Android or an X server.
 
 ## Window Icons
 

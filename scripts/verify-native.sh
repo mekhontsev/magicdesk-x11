@@ -28,6 +28,19 @@ timeout 15 "$work/commands"
 timeout 15 "$work/output-commands"
 "$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/fullscreen-state-test.c" -o "$work/fullscreen"
 timeout 15 "$work/fullscreen"
+"$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/window-placement-test.c" -o "$work/placement"
+timeout 15 "$work/placement"
+"$cc" -std=gnu11 -O2 -Wall -Wextra -UNDEBUG \
+    -I"$work" -I"$root/examples/host-config" -I"$src/xserver/include" -I"$src/xserver/Xext" \
+    -I"$src/xserver/Xi" -I"$src/xorgproto/include" -I"$src/pixman/pixman" \
+    -I"$src/libxfont/include" -I"$src/xserver/miext/damage" -I"$src/xserver/render" \
+    "$root/examples/window-family-test.c" -o "$work/family"
+timeout 15 "$work/family"
+"$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/window-size-test.c" -o "$work/size"
+timeout 15 "$work/size"
+"$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG -I"$src/libxcvt/include" \
+    "$root/examples/screen-mode-test.c" "$src/libxcvt/lib/libxcvt.c" -lm -o "$work/screen-mode"
+timeout 15 "$work/screen-mode"
 
 # Buffer ownership and AHardwareBuffer failure injection use Android's actual ABI.
 if [ "$(uname -o)" = Android ]; then
