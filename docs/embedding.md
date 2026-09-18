@@ -217,8 +217,13 @@ transient link, and bounds both kinds of links against malformed client chains.
 unrelated windows, cycles, family activation order and modal focus. The family fixture focuses a hidden child inside
 each popup, so its click must reach the popup without raising the main window.
 
-`lorieCloseWindow` sends
+`lorieCloseWindow(..., force)` sends
 `WM_DELETE_WINDOW`, falling back to X client termination if unsupported.
+`force=true` bypasses that protocol and disconnects the window's owning client,
+including its other windows, never the entire server. It does not signal a
+Linux PID or assume one process per window. Both modes use the same ordered
+command stream; window-destruction callbacks, not command submission, establish
+that the client is gone. A normal request may be ignored or cancelled.
 Output destruction itself still releases only a presentation. The host
 decides when to close clients and retained/application sessions.
 Each output owns its pressed keys/buttons. Destruction of its selected window,

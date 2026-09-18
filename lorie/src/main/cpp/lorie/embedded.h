@@ -80,7 +80,8 @@ void lorieOutputFocus(LorieConnection*, uint32_t output, uint32_t window);
 void lorieOutputRelease(LorieConnection*, uint32_t output, uint32_t window);
 void lorieObserveWindows(LorieConnection*);
 void lorieInspectWindow(LorieConnection*, uint32_t serial, uint32_t window, uint16_t limit);
-void lorieCloseWindow(LorieConnection*, uint32_t window);
+// Graceful WM_DELETE_WINDOW, or disconnect the owning client when force is true.
+void lorieCloseWindow(LorieConnection*, uint32_t window, bool force);
 void lorieSetScreenDpi(LorieConnection*, int dpi);
 void lorieConfirmWindowState(LorieConnection*, uint32_t window, uint32_t requestSerial, LorieWindowState actual);
 void lorieConnectionData(LorieConnection* connection, int operation, int channel,

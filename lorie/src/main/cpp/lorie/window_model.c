@@ -417,10 +417,10 @@ static void clientMessage(WindowPtr window, const char* protocol) {
     TryClientEvents(wClient(window), NULL, &event, 1, NoEventMask, NoEventMask, NullGrab);
 }
 
-void lorieWindowClose(XID id) {
+void lorieWindowClose(XID id, Bool force) {
     WindowPtr window = lookup(id);
     if (!window || !isApplication(window)) return;
-    if (hasAtom(window, "WM_PROTOCOLS", "WM_DELETE_WINDOW")) clientMessage(window, "WM_DELETE_WINDOW");
+    if (!force && hasAtom(window, "WM_PROTOCOLS", "WM_DELETE_WINDOW")) clientMessage(window, "WM_DELETE_WINDOW");
     else CloseDownClient(wClient(window));
 }
 

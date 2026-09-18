@@ -25,7 +25,7 @@ int main() {
     lorieOutputText(owner, 7, 0xf0000001, 0x1f600);
     lorieOutputFocus(owner, 7, 0xf0000001);
     lorieConfirmWindowState(owner, 0xf0000001, 0xffffffff, {.fullscreen = true});
-    lorieCloseWindow(owner, 0xf0000001);
+    lorieCloseWindow(owner, 0xf0000001, false);
     lorieOutputRelease(owner, 7, 0xf0000001);
 
     const int operations[] = {7, 9, 0, 1, 2, 2, 2, 3, 3, 6, 5, 10, 8, 4};
@@ -59,5 +59,8 @@ int main() {
     lorieInspectWindow(owner, 42, 0xf0000001, 256);
     assert(commands[17].operation == LORIE_OUTPUT_INSPECT && commands[17].output == 42);
     assert(commands[17].window == 0xf0000001 && commands[17].detail == 256);
+    lorieCloseWindow(owner, 0xf0000001, true);
+    assert(commands[18].operation == LORIE_OUTPUT_CLOSE && commands[18].window == 0xf0000001);
+    assert(commands[18].down && !commands[12].down);
     puts("Semantic output commands preserve ordering, IDs, coordinates and state acknowledgements");
 }

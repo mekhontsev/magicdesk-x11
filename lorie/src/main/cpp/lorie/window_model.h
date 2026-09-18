@@ -11,5 +11,5 @@ void lorieWindowFullscreenConfirm(XID window, uint32_t serial, Bool fullscreen);
 Bool lorieWindowBelongsTo(WindowPtr window, WindowPtr owner);
 void lorieWindowFamily(WindowPtr owner, void (*visit)(WindowPtr, void*), void* data);
 void lorieWindowFocus(WindowPtr window);
-void lorieWindowClose(XID window);
+void lorieWindowClose(XID window, Bool force);
 void lorieWindowConstrainSize(WindowPtr window, int* width, int* height);
