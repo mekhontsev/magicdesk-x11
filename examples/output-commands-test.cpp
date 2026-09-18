@@ -56,5 +56,8 @@ int main() {
     assert(commands[15].x == 1);
     lorieConfirmWindowState(owner, 0xf0000001, 2, {.fullscreen = false});
     assert(commands[16].x == 2 && !commands[16].down);
+    lorieInspectWindow(owner, 42, 0xf0000001, 256);
+    assert(commands[17].operation == LORIE_OUTPUT_INSPECT && commands[17].output == 42);
+    assert(commands[17].window == 0xf0000001 && commands[17].detail == 256);
     puts("Semantic output commands preserve ordering, IDs, coordinates and state acknowledgements");
 }

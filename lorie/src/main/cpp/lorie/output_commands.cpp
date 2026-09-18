@@ -32,6 +32,9 @@ void lorieOutputRelease(LorieConnection* c, uint32_t output, uint32_t window) {
     send(c, LORIE_OUTPUT_RELEASE, output, window);
 }
 void lorieObserveWindows(LorieConnection* c) { send(c, LORIE_OUTPUT_OBSERVE); }
+void lorieInspectWindow(LorieConnection* c, uint32_t serial, uint32_t window, uint16_t limit) {
+    send(c, LORIE_OUTPUT_INSPECT, serial, window, 0, 0, limit);
+}
 void lorieCloseWindow(LorieConnection* c, uint32_t window) { send(c, LORIE_OUTPUT_CLOSE, 0, window); }
 void lorieSetScreenDpi(LorieConnection* c, int dpi) { send(c, LORIE_OUTPUT_DPI, 0, 0, dpi); }
 void lorieConfirmWindowState(LorieConnection* c, uint32_t window, uint32_t requestSerial, LorieWindowState actual) {

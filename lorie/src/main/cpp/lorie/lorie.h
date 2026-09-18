@@ -73,6 +73,8 @@ typedef enum {
     EVENT_OUTPUT_LAYER,
     EVENT_OUTPUT_WINDOW,
     EVENT_OUTPUT_WINDOWS_DONE,
+    EVENT_INSPECTION_NODE,
+    EVENT_INSPECTION_DONE,
     EVENT_DATA,
 } eventType;
 
@@ -135,6 +137,8 @@ typedef union {
         uint32_t serial;
     } sync;
     LorieOutputCommand output;
+    struct { uint8_t t; uint32_t serial; LorieInspectionNode node; } inspectionNode;
+    struct { uint8_t t; uint32_t serial; LorieInspectionResult result; } inspectionDone;
     struct {
         uint8_t t;
         uint32_t output, window, width, height;

@@ -162,6 +162,23 @@ explicit SPLASH is retained for startup presentation; absent type, WM_CLASS and
 WM_STATE remain unclassified, not guessed from executable names. The host owns
 startup handoff and session lifetime. Titles are bounded to 255 UTF-8 bytes.
 
+`lorieInspectWindow` is an independent read-only request on the ordered command
+connection. `inspectionNode` callbacks followed by `inspectionDone` carry its
+serial and a snapshot taken on the X server thread. Membership reuses the
+compositor's family policy but also traverses actual children, including
+unmapped and InputOnly windows. Actual parents, transient references and client
+leaders remain separate fields. Geometry is in X-root pixels; focus is the exact
+keyboard target, including special none/pointer-root states. No output, focus,
+geometry or catalog mutation is performed.
+
+The owner is emitted first; a request returns at most 256 nodes and visits at
+most 8192 tree entries. Completion explicitly marks a missing owner or truncated
+walk. Titles are bounded to 191 UTF-8 bytes. Node/summary records fit the existing
+fixed event envelope and use stack storage, adding no per-frame or per-input
+allocation. Callers own request deadlines and Android host association; the
+engine knows neither task IDs nor UI access grants. XIDs are live resource
+identities and can be reused after destruction, not persistent handles.
+
 An individual output composites its main pixmap and the mapped transient
 family, back to front, with premultiplied alpha for depth-32 layers. Group
 transients/unparented popups follow the focused member only when their

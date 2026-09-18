@@ -16,6 +16,7 @@
 #include "window_role.h"
 #include "window_size.h"
 #include "window_family.h"
+#include "window_inspection_walk.h"
 
 extern ScreenPtr pScreenPtr;
 extern DeviceIntPtr lorieKeyboard;
@@ -115,6 +116,61 @@ static void visitFamily(WindowPtr node, WindowPtr owner, void (*visit)(WindowPtr
 
 void lorieWindowFamily(WindowPtr owner, void (*visit)(WindowPtr, void*), void* data) {
     visitFamily(pScreenPtr->root, owner, visit, data);
+}
+
+static uint32_t inspectionType(WindowPtr window) {
+    static const char* const names[] = {"_NET_WM_WINDOW_TYPE_NORMAL", "_NET_WM_WINDOW_TYPE_DIALOG",
+        "_NET_WM_WINDOW_TYPE_MENU", "_NET_WM_WINDOW_TYPE_DROPDOWN_MENU", "_NET_WM_WINDOW_TYPE_POPUP_MENU",
+        "_NET_WM_WINDOW_TYPE_TOOLTIP", "_NET_WM_WINDOW_TYPE_SPLASH", "_NET_WM_WINDOW_TYPE_UTILITY"};
+    for (unsigned i = 0; i < ARRAY_SIZE(names); i++)
+        if (hasAtom(window, "_NET_WM_WINDOW_TYPE", names[i])) return i + 1;
+    return property(window, "_NET_WM_WINDOW_TYPE") ? LORIE_INSPECT_OTHER : LORIE_INSPECT_UNKNOWN;
+}
+
+static void inspectNode(WindowPtr window, void* data) {
+    lorieEvent event = {.inspectionNode = {.t = EVENT_INSPECTION_NODE, .serial = *(uint32_t*)data}};
+    LorieInspectionNode* node = &event.inspectionNode.node;
+    node->id = window->drawable.id;
+    node->parent = window->parent ? window->parent->drawable.id : 0;
+    node->transientFor = reference(window, "WM_TRANSIENT_FOR");
+    node->leader = reference(window, "WM_CLIENT_LEADER");
+    node->x = window->drawable.x; node->y = window->drawable.y;
+    node->width = window->drawable.width; node->height = window->drawable.height;
+    node->flags = (window->mapped ? LORIE_INSPECT_MAPPED : 0)
+            | (window->realized ? LORIE_INSPECT_REALIZED : 0)
+            | (window->drawable.class == InputOnly ? LORIE_INSPECT_INPUT_ONLY : 0)
+            | (window->overrideRedirect ? LORIE_INSPECT_OVERRIDE_REDIRECT : 0)
+            | (hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_MODAL") ? LORIE_INSPECT_MODAL : 0);
+    node->type = inspectionType(window);
+    PropertyPtr title = property(window, "_NET_WM_NAME");
+    if (!title || title->format != 8) title = property(window, "WM_NAME");
+    if (title && title->format == 8) memcpy(node->title, title->data, min(title->size, sizeof(node->title) - 1));
+    lorieSendOutputFrame(&event);
+}
+
+void lorieWindowInspect(uint32_t serial, XID id, unsigned limit) {
+    lorieEvent done = {.inspectionDone = {.t = EVENT_INSPECTION_DONE, .serial = serial,
+            .result = {.window = id, .focusKind = 3}}};
+    LorieInspectionResult* result = &done.inspectionDone.result;
+    WindowPtr root = pScreenPtr ? pScreenPtr->root : NULL;
+    WindowPtr owner = root ? lookup(id) : NULL;
+    if (owner == root) owner = NULL;
+    if (root) {
+        result->screenWidth = root->drawable.width; result->screenHeight = root->drawable.height;
+        DeviceIntPtr keyboard = lorieKeyboard ? GetMaster(lorieKeyboard, KEYBOARD_OR_FLOAT) : NULL;
+        if (keyboard && keyboard->focus) {
+            WindowPtr focus = keyboard->focus->win;
+            result->focusKind = focus == PointerRootWin ? 1 : (!focus || focus == NoneWin ? 0 : 2);
+            if (result->focusKind == 2) result->focus = focus->drawable.id;
+        }
+    }
+    result->found = owner != NULL;
+    if (owner) {
+        if (limit < 1 || limit > LORIE_INSPECTION_LIMIT) limit = LORIE_INSPECTION_LIMIT;
+        LorieInspectionWalk walk = lorieInspectFamily(root, owner, limit, familyMember, inspectNode, &serial);
+        result->count = walk.count; result->truncated = walk.truncated;
+    }
+    lorieSendOutputFrame(&done);
 }
 
 static Bool isApplication(WindowPtr window) {

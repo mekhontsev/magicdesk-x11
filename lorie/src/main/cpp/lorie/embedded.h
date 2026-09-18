@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "window_role.h"
+#include "window_inspection.h"
 
 typedef struct ANativeWindow ANativeWindow;
 
@@ -49,6 +50,9 @@ typedef struct {
     // Receiver owns descriptor when nonnegative. Callbacks run on the connection's Looper.
     void (*data)(void*, int operation, int channel, uint32_t serial, uint32_t offer,
             uint32_t output, uint32_t window, int x, int y, const char* type, int descriptor);
+    // One bounded read-only reply; borrowed nodes precede its completion on the connection Looper.
+    void (*inspectionNode)(void*, uint32_t serial, const LorieInspectionNode*);
+    void (*inspectionDone)(void*, uint32_t serial, const LorieInspectionResult*);
 } LorieCallbacks;
 
 enum LorieDataCommand {
@@ -73,6 +77,7 @@ void lorieOutputText(LorieConnection*, uint32_t output, uint32_t window, uint32_
 void lorieOutputFocus(LorieConnection*, uint32_t output, uint32_t window);
 void lorieOutputRelease(LorieConnection*, uint32_t output, uint32_t window);
 void lorieObserveWindows(LorieConnection*);
+void lorieInspectWindow(LorieConnection*, uint32_t serial, uint32_t window, uint16_t limit);
 void lorieCloseWindow(LorieConnection*, uint32_t window);
 void lorieSetScreenDpi(LorieConnection*, int dpi);
 void lorieConfirmWindowState(LorieConnection*, uint32_t window, uint32_t requestSerial, LorieWindowState actual);

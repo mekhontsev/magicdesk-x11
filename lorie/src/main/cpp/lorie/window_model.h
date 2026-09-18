@@ -4,6 +4,7 @@
 void lorieWindowModelInit(ScreenPtr screen);
 void lorieWindowModelReset(void);
 void lorieWindowModelObserve(void);
+void lorieWindowInspect(uint32_t serial, XID window, unsigned limit);
 void lorieWindowModelRefresh(void);
 void lorieWindowManagerReady(void);
 void lorieWindowFullscreenConfirm(XID window, uint32_t serial, Bool fullscreen);

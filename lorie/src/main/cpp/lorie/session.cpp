@@ -112,6 +112,13 @@ struct LorieConnection {
                 break;
             }
             case EVENT_OUTPUT_WINDOWS_DONE: callbacks.windowsCommitted(context); break;
+            case EVENT_INSPECTION_NODE:
+                header.inspectionNode.node.title[sizeof(header.inspectionNode.node.title) - 1] = 0;
+                callbacks.inspectionNode(context, header.inspectionNode.serial, &header.inspectionNode.node);
+                break;
+            case EVENT_INSPECTION_DONE:
+                callbacks.inspectionDone(context, header.inspectionDone.serial, &header.inspectionDone.result);
+                break;
             case EVENT_SHARED_SERVER_STATE: {
                 int sharedFd = ancil_recv_fd(fd);
                 if (sharedFd < 0) { disconnect(true); return 0; }
@@ -172,7 +179,8 @@ struct LorieConnection {
 
 LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* context) {
     if (!callbacks || !callbacks->frame || !callbacks->disconnected || !callbacks->window ||
-            !callbacks->windowsCommitted || !callbacks->data) return nullptr;
+            !callbacks->windowsCommitted || !callbacks->data ||
+            !callbacks->inspectionNode || !callbacks->inspectionDone) return nullptr;
     void* memory = malloc(sizeof(LorieConnection));
     if (!memory) return nullptr;
     auto* connection = new (memory) LorieConnection(*callbacks, context);
