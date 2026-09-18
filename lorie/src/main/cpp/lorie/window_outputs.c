@@ -70,6 +70,15 @@ static void releaseInput(OutputSelection* output) {
     for (int button = 1; button <= 7; button++) outputButton(output, button, FALSE);
 }
 
+void lorieReleaseOutputButton(uint32_t id, uint32_t window, int button) {
+    if (button < 1 || button > 7) return;
+    for (OutputSelection* output = selections; output; output = output->next)
+        if (output->id == id && output->window == window) {
+            outputButton(output, button, FALSE);
+            return;
+        }
+}
+
 void lorieReleaseOutputInput(void) {
     for (OutputSelection* output = selections; output; output = output->next) releaseInput(output);
 }

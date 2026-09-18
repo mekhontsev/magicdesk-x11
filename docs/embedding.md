@@ -225,6 +225,10 @@ Each output owns its pressed keys/buttons. Destruction of its selected window,
 rebinding, release or disconnect releases those input leases; a late key-up must
 not leave the shared keyboard repeating after a startup-window handoff. Other
 views' held keys remain owned until those views release them.
+Exported drag completion releases the originating output's button lease through
+the same input owner, not a raw device release. Completion is idempotent and must
+not release another output's button. `examples/output-input-test.c` covers these
+invariants in the Android run of `scripts/verify-native.sh`.
 Focus and group-transient association use the injection keyboard's effective
 master, matching core X clients; the slave's stale focus is not an application
 focus observation. Whole-screen outputs retain their window manager's focus.
@@ -242,6 +246,11 @@ send BEGIN and report FINISH/CANCEL. An X-side destination retains the toolkit's
 pointer-grab/drop handshake while Android owns the gesture. Copy is the supported
 action. Same-server drops retain the original XdndSelection; cross-server drops
 use host-provided data. Source disappearance, timeout and disconnect cancel work.
+Before releasing the original button, the catcher is restored above any newly
+focused recipient. It remains until the source completes its drop handshake,
+including a rejected host drop; otherwise the source may perform another native
+drop into the recipient. This changes only X11 input-only stacking, not Android
+task placement.
 
 Resolving file paths and importing files belongs to the host adapter running in
 the server execution domain. This native module does not open Android providers

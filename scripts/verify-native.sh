@@ -42,8 +42,15 @@ timeout 15 "$work/size"
     "$root/examples/screen-mode-test.c" "$src/libxcvt/lib/libxcvt.c" -lm -o "$work/screen-mode"
 timeout 15 "$work/screen-mode"
 
-# Buffer ownership and AHardwareBuffer failure injection use Android's actual ABI.
+# Output ownership and buffer tests compile the implementation against Android's ABI.
 if [ "$(uname -o)" = Android ]; then
+    "$cc" $android_target -std=gnu11 -O2 -Wall -Wextra -UNDEBUG -ffunction-sections -fdata-sections \
+        -I"$work" -I"$root/examples/host-config" -I"$src/xserver/include" -I"$src/xserver/Xext" \
+        -I"$src/xserver/Xi" -I"$src/xorgproto/include" -I"$src/pixman/pixman" \
+        -I"$src/libxfont/include" -I"$src/xserver/miext/damage" -I"$src/xserver/render" \
+        -I"$src/xserver/composite" -I"$src/xserver/mi" -I"$src/xserver/damageext" -I"$src/xserver/xfixes" \
+        "$root/examples/output-input-test.c" -Wl,--gc-sections -o "$work/output-input"
+    timeout 15 "$work/output-input"
     "$cc" -std=gnu11 -DANDROID -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ -DEGL_NO_PLATFORM_SPECIFIC_TYPES \
         -ffunction-sections -fdata-sections -Wno-nullability-completeness \
         -I"$work" -I"$src/xserver/include" -I"$src/pixman/pixman" \

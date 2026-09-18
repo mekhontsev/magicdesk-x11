@@ -58,6 +58,7 @@ static Bool dragMoveQueued;
 static LorieDataEvent dragMove;
 static unsigned dragVersion;
 static Window catcher, exportedSource;
+static uint32_t exportedOutput, exportedWindow;
 static Bool exportDropped, exportCompleted, exportSuccess;
 static OsTimerPtr exportTimer;
 static int (*previousSendEvent)(ClientPtr);
@@ -520,14 +521,35 @@ static void dropDrag(void) {
     else emit(LORIE_DATA_FINISH, 1, 0, offers[1].generation, NULL, -1, dragOutput, dragTarget, 0);
 }
 
+static void releaseExportPointer(void) {
+    // Android owns the gesture now; release its original output's lease, not
+    // just the X device button, or the next press is mistaken for a duplicate.
+    if (!exportedOutput) return;
+    // Focus may have raised a recipient above the input-only export catcher.
+    // The original toolkit must release over the catcher, not perform a second
+    // native drop into the recipient that Android already delivered to.
+    WindowPtr win = windowFor(catcher);
+    if (win) {
+        XID above = Above;
+        ConfigureWindow(win, CWStackMode, &above, serverClient);
+        ValuatorMask mask;
+        valuator_mask_zero(&mask);
+        valuator_mask_set_double(&mask, 0, 0);
+        valuator_mask_set_double(&mask, 1, 0);
+        QueuePointerEvents(lorieMouse, MotionNotify, 0, POINTER_RELATIVE, &mask);
+    }
+    lorieReleaseOutputButton(exportedOutput, exportedWindow, 1);
+    if (pointerOutput == exportedOutput && pointerWindow == exportedWindow) pointerDown = FALSE;
+    exportedOutput = exportedWindow = 0;
+}
+
 static void endExport(void) {
     if (exportTimer) { TimerFree(exportTimer); exportTimer = NULL; }
     if (exportedSource) message(exportedSource, exportedSource, finished, catcher,
             exportDropped && exportCompleted && exportSuccess ? 1 : 0, copy, 0, 0);
     exportedSource = None;
     if (catcher) { FreeResource(catcher, RT_NONE); catcher = None; }
-    if (pointerDown) QueuePointerEvents(lorieMouse, ButtonRelease, 1, POINTER_RELATIVE, NULL);
-    pointerDown = FALSE;
+    releaseExportPointer();
 }
 
 static CARD32 exportExpired(__unused OsTimerPtr timer, __unused CARD32 now, __unused void* closure) {
@@ -551,6 +573,8 @@ static void beginExport(void) {
     dixChangeWindowProperty(serverClient, win, aware, XA_ATOM, 32, PropModeReplace, 1, &version, TRUE);
     MapWindow(win, serverClient);
     exportedSource = offers[1].owner;
+    exportedOutput = pointerOutput;
+    exportedWindow = pointerWindow;
     exportDropped = exportCompleted = exportSuccess = FALSE;
     exportTimer = TimerSet(NULL, 0, TRANSFER_DEADLINE, exportExpired, NULL);
     ValuatorMask mask;
@@ -633,11 +657,11 @@ void lorieDataCommand(const LorieDataEvent* event, int fd) {
             if (exportedSource) {
                 exportCompleted = TRUE;
                 exportSuccess = event->operation == LORIE_DATA_FINISH && event->x;
-                if (pointerDown) QueuePointerEvents(lorieMouse, ButtonRelease, 1, POINTER_RELATIVE, NULL);
-                pointerDown = FALSE;
-                if (exportDropped || !exportSuccess) endExport();
+                releaseExportPointer();
+                if (exportDropped) endExport();
             }
             dragTarget = None; dragAccepted = FALSE;
+            dragMoveQueued = dragDropPending = dragPositionPending = FALSE;
             break;
         case LORIE_DATA_BEGIN: beginExport(); break;
     }

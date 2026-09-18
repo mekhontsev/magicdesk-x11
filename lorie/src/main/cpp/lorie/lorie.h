@@ -172,6 +172,7 @@ void loriePrepareOutputs(void);
 void loriePublishOutputs(struct lorie_shared_server_state* state);
 void lorieResetOutputs(void);
 void lorieReleaseOutputInput(void);
+void lorieReleaseOutputButton(uint32_t output, uint32_t window, int button);
 struct _Pixmap;
 LorieBuffer* lorieExportPixmap(struct _Pixmap* pixmap);
 void lorieSendOutputFrame(const lorieEvent* event);
