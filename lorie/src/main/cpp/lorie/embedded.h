@@ -35,6 +35,8 @@ typedef struct {
 } LorieWindowManagement;
 typedef struct {
     const char* title;
+    const char* instance;
+    const char* className;
     const uint32_t* icon;
     bool mapped;
     LorieWindowRole role;

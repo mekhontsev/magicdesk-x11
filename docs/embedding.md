@@ -26,6 +26,9 @@ snapshots. `output_commands.cpp` alone translates their arguments to the private
 connection FIFO, with no extra native heap allocation or per-command thread.
 Normalized pointer coordinates are clipped and quantized at this boundary.
 Platform keycode translation belongs to the host adapter, not the X server.
+Window snapshots include the two `WM_CLASS` strings as bounded, untruncated
+ICCCM string values (empty when absent, malformed or oversized). Property changes
+republish metadata; launch correlation belongs to the host, not the engine.
 
 Each output selects XID zero (the whole screen) or a Composite window family.
 Surface calls borrow ANativeWindow; the renderer retains its own reference and
@@ -201,13 +204,17 @@ regression against the actual bundled CVT implementation.
 
 `lorieOutputFocus` preserves active keyboard grabs and existing dialog focus,
 otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`.
+When returning from another family, activation raises the owner followed by its
+mapped transients in stacking order and targets the topmost modal member. It
+collects a bounded, stack-allocated snapshot before changing sibling links, so
+reopening an Android host cannot bury an existing dialog under its parent.
 Focus-family membership includes actual X children as well as transient links:
 toolkits can focus a hidden child inside a modal dialog. Raising the main window
 in response to that valid focus would bury the dialog and block visible input.
 The allocation-free traversal checks real ancestors first, follows their nearest
 transient link, and bounds both kinds of links against malformed client chains.
 `window-family-test.c` covers focus children, nested transients, WM frames,
-unrelated windows and cycles. The family fixture focuses a hidden child inside
+unrelated windows, cycles, family activation order and modal focus. The family fixture focuses a hidden child inside
 each popup, so its click must reach the popup without raising the main window.
 
 `lorieCloseWindow` sends

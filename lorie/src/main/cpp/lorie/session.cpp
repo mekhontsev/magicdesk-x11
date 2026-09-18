@@ -72,8 +72,12 @@ struct LorieConnection {
             if (windowIconBytes != sizeof(windowIcon)) return 1;
         }
         header.windowInfo.title[sizeof(header.windowInfo.title) - 1] = 0;
+        header.windowInfo.instance[sizeof(header.windowInfo.instance) - 1] = 0;
+        header.windowInfo.className[sizeof(header.windowInfo.className) - 1] = 0;
         const LorieWindowInfo info{
             .title = header.windowInfo.title,
+            .instance = header.windowInfo.instance,
+            .className = header.windowInfo.className,
             .icon = header.windowInfo.hasIcon ? windowIcon : nullptr,
             .mapped = header.windowInfo.mapped != 0,
             .role = (LorieWindowRole)header.windowInfo.role,

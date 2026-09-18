@@ -155,6 +155,7 @@ typedef union {
         uint32_t window, fullscreenSerial;
         uint8_t hostManaged, fullscreenRequested, fullscreenActual, role;
         char title[256];
+        char instance[128], className[128];
     } windowInfo;
 } lorieEvent;
 

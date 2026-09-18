@@ -19,6 +19,29 @@ static Bool belongs(WindowPtr window) {
 
 static WindowPtr inspected[16];
 static unsigned inspectedCount;
+static WindowPtr raised[256];
+static unsigned raisedCount;
+static void raiseWindow(WindowPtr window) { raised[raisedCount++] = window; }
+
+static void activationTest(void) {
+    LorieWindowActivation activation = {.members = {&owner}, .focus = &owner, .count = 1};
+    lorieWindowActivationAdd(&activation, &dialog, TRUE);
+    lorieWindowActivationAdd(&activation, &owner, FALSE);
+    lorieWindowActivationAdd(&activation, &nested, TRUE);
+    lorieWindowActivationAdd(&activation, &other, FALSE); // A non-modal popup keeps modal focus.
+    assert(lorieWindowActivationApply(&activation, &root, raiseWindow) == &nested);
+    assert(raisedCount == 4 && raised[0] == &owner && raised[1] == &frame);
+    assert(raised[2] == &nested && raised[3] == &other);
+    raisedCount = 0;
+    activation = (LorieWindowActivation){.members = {&owner}, .focus = &owner, .count = 1};
+    assert(lorieWindowActivationApply(&activation, &root, raiseWindow) == &owner);
+    assert(raisedCount == 1);
+    for (unsigned i = 1; i < 256; i++) lorieWindowActivationAdd(&activation, &other, FALSE);
+    assert(!activation.truncated && activation.count == 256);
+    lorieWindowActivationAdd(&activation, &other, FALSE);
+    raisedCount = 0;
+    assert(lorieWindowActivationApply(&activation, &root, raiseWindow) == NULL && raisedCount == 0);
+}
 static Bool inspectionMember(WindowPtr window, WindowPtr selected) {
     assert(selected == &owner);
     return window == &other || belongs(window); // Models a compositor-associated group popup.
@@ -51,6 +74,7 @@ int main(void) {
     // WM frames are not owned by their children; reparenting must not hide a
     // client's transient link, and a link may itself target a focus child.
     dialog.parent = &frame;
+    activationTest();
     assert(belongs(&dialogInput));
     assert(!belongs(&frame));
     nestedOwner = &dialogInput;

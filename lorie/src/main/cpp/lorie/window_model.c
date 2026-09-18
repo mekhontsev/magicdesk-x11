@@ -230,6 +230,19 @@ static void publishWindow(WindowPtr window) {
                 .fullscreenRequested = record->fullscreen.requested,
                 .fullscreenActual = record->fullscreen.actual}};
         memcpy(event.windowInfo.title, title, sizeof(title));
+        value = property(window, "WM_CLASS");
+        if (value && value->data && value->size && value->type == XA_STRING && value->format == 8) {
+            const char* bytes = value->data;
+            size_t first = strnlen(bytes, value->size);
+            if (first < sizeof(event.windowInfo.instance) && first < value->size)
+                memcpy(event.windowInfo.instance, bytes, first);
+            if (first < value->size) {
+                size_t remaining = value->size - first - 1;
+                size_t second = strnlen(bytes + first + 1, remaining);
+                if (second < sizeof(event.windowInfo.className) && second < remaining)
+                    memcpy(event.windowInfo.className, bytes + first + 1, second);
+            }
+        }
         lorieSendWindowInfo(&event, icon);
         record->published = TRUE;
         record->changed = FALSE;
@@ -411,6 +424,15 @@ void lorieWindowClose(XID id) {
     else CloseDownClient(wClient(window));
 }
 
+static void collectActivation(WindowPtr window, void* closure) {
+    lorieWindowActivationAdd(closure, window, hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_MODAL"));
+}
+
+static void raiseWindow(WindowPtr window) {
+    XID above = Above;
+    ConfigureWindow(window, CWStackMode, &above, serverClient);
+}
+
 void lorieWindowFocus(WindowPtr window) {
     if (!window || !window->realized) return;
     // Do not break toolkit popup grabs or replace a dialog's keyboard focus with its parent.
@@ -419,10 +441,10 @@ void lorieWindowFocus(WindowPtr window) {
     if (keyboard->deviceGrab.grab || lorieKeyboard->deviceGrab.grab) return;
     WindowPtr focus = keyboard->focus ? keyboard->focus->win : NULL;
     if (focus && focus != PointerRootWin && focus != NoneWin && lorieWindowBelongsTo(focus, window)) return;
-    WindowPtr stack = window;
-    while (stack->parent && stack->parent != pScreenPtr->root) stack = stack->parent;
-    XID above = Above;
-    ConfigureWindow(stack, CWStackMode, &above, serverClient);
+    LorieWindowActivation activation = {.members = {window}, .focus = window, .count = 1};
+    lorieWindowFamily(window, collectActivation, &activation);
+    window = lorieWindowActivationApply(&activation, pScreenPtr->root, raiseWindow);
+    if (!window) return;
     PropertyPtr hints = property(window, "WM_HINTS");
     Bool accepts = !hints || hints->format != 32 || hints->size < 2
             || !(((CARD32*)hints->data)[0] & 1) || ((CARD32*)hints->data)[1];
@@ -431,6 +453,11 @@ void lorieWindowFocus(WindowPtr window) {
 }
 
 static void propertyChanged(CallbackListPtr* list, void* closure, void* data) {
+    const PropertyStateRec* change = data;
+    if (change->prop->propertyName == XA_WM_CLASS) {
+        for (WindowRecord* record = records; record; record = record->next)
+            if (record->id == change->win->drawable.id) record->changed = TRUE;
+    }
     dirty = TRUE;
     lorieOutputGeometryChanged();
 }
