@@ -299,6 +299,7 @@ add_library(LorieNative STATIC
         "lorie/window_model.c"
         "lorie/density.c"
         "lorie/session.cpp"
+        "lorie/output_commands.cpp"
         "lorie/buffer.c"
         "lorie/dma_copy.c"
         "lorie/cmdentrypoint.cpp"

@@ -3,7 +3,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <android/native_window.h>
+
+typedef struct ANativeWindow ANativeWindow;
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,23 +20,34 @@ int lorieServerConnect(void);
 
 typedef struct LorieConnection LorieConnection;
 typedef struct {
+    uint32_t serial;
+    bool fullscreen;
+} LorieWindowRequest;
+typedef struct {
+    bool fullscreen;
+} LorieWindowState;
+typedef struct {
+    bool managed;
+    LorieWindowRequest request;
+    LorieWindowState actual;
+} LorieWindowManagement;
+typedef struct {
+    const char* title;
+    const uint32_t* icon;
+    bool mapped;
+    LorieWindowManagement management;
+} LorieWindowInfo;
+
+typedef struct {
     void (*frame)(void*, uint32_t output, uint32_t window, int width, int height, bool available);
     void (*disconnected)(void*);
-    // Text and icon memory is borrowed only for the callback. Icons are 64x64 ARGB.
-    void (*window)(void*, uint32_t id, const char* title, const uint32_t* icon, bool removed, bool mapped,
-            bool hostManaged, uint32_t fullscreenSerial, bool fullscreenRequested, bool fullscreenActual);
+    // Null info removes the window. Snapshot/text/icon memory is borrowed for the callback; icons are 64x64 ARGB.
+    void (*window)(void*, uint32_t id, const LorieWindowInfo* info);
     void (*windowsCommitted)(void*);
     // Receiver owns descriptor when nonnegative. Callbacks run on the connection's Looper.
     void (*data)(void*, int operation, int channel, uint32_t serial, uint32_t offer,
             uint32_t output, uint32_t window, int x, int y, const char* type, int descriptor);
 } LorieCallbacks;
-
-enum LorieCommand {
-    LORIE_OUTPUT_BIND = 0, LORIE_OUTPUT_RESIZE = 1, LORIE_OUTPUT_POINTER = 2, LORIE_OUTPUT_KEY = 3,
-    LORIE_OUTPUT_RELEASE = 4, LORIE_OUTPUT_FOCUS = 5, LORIE_OUTPUT_TEXT = 6,
-    LORIE_OUTPUT_OBSERVE = 7, LORIE_OUTPUT_CLOSE = 8, LORIE_OUTPUT_DPI = 9,
-    LORIE_OUTPUT_FULLSCREEN_CONFIRM = 10
-};
 
 enum LorieDataCommand {
     LORIE_DATA_ENABLE = 1, LORIE_DATA_OFFER, LORIE_DATA_READ, LORIE_DATA_REQUEST,
@@ -49,8 +61,19 @@ LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* co
 bool lorieConnectionConnect(LorieConnection* connection, int ownedDescriptor);
 // Borrows window during the call; retains its own reference until acknowledged release.
 bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativeWindow* window, bool release);
-void lorieConnectionCommand(LorieConnection* connection, uint32_t output, uint32_t window,
-        int operation, int x, int y, int detail, bool down);
+// All commands use the connection's one ordered, nonblocking queue.
+void lorieOutputBind(LorieConnection*, uint32_t output, uint32_t window);
+void lorieOutputResize(LorieConnection*, uint32_t output, uint32_t window, int width, int height);
+// Finite coordinates normalized to content, excluding host letterboxing; clipped to [0,1]. Button 0 is motion.
+void lorieOutputPointer(LorieConnection*, uint32_t output, uint32_t window, float x, float y, uint16_t button, bool down);
+void lorieOutputKey(LorieConnection*, uint32_t output, uint32_t window, uint16_t xKeyCode, bool down);
+void lorieOutputText(LorieConnection*, uint32_t output, uint32_t window, uint32_t codePoint);
+void lorieOutputFocus(LorieConnection*, uint32_t output, uint32_t window);
+void lorieOutputRelease(LorieConnection*, uint32_t output, uint32_t window);
+void lorieObserveWindows(LorieConnection*);
+void lorieCloseWindow(LorieConnection*, uint32_t window);
+void lorieSetScreenDpi(LorieConnection*, int dpi);
+void lorieConfirmWindowState(LorieConnection*, uint32_t window, uint32_t requestSerial, LorieWindowState actual);
 void lorieConnectionData(LorieConnection* connection, int operation, int channel,
         uint32_t serial, uint32_t offer, uint32_t output, uint32_t window,
         int x, int y, const char* type, int borrowedDescriptor);

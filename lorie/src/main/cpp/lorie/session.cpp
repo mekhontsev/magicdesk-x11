@@ -72,11 +72,14 @@ struct LorieConnection {
             if (windowIconBytes != sizeof(windowIcon)) return 1;
         }
         header.windowInfo.title[sizeof(header.windowInfo.title) - 1] = 0;
-        callbacks.window(context, header.windowInfo.window, header.windowInfo.title,
-                header.windowInfo.hasIcon ? windowIcon : nullptr,
-                header.windowInfo.removed, header.windowInfo.mapped, header.windowInfo.hostManaged,
-                header.windowInfo.fullscreenSerial, header.windowInfo.fullscreenRequested,
-                header.windowInfo.fullscreenActual);
+        const LorieWindowInfo info{
+            .title = header.windowInfo.title,
+            .icon = header.windowInfo.hasIcon ? windowIcon : nullptr,
+            .mapped = header.windowInfo.mapped != 0,
+            .management = {.managed = header.windowInfo.hostManaged != 0,
+                .request = {.serial = header.windowInfo.fullscreenSerial, .fullscreen = header.windowInfo.fullscreenRequested != 0},
+                .actual = {.fullscreen = header.windowInfo.fullscreenActual != 0}}};
+        callbacks.window(context, header.windowInfo.window, header.windowInfo.removed ? nullptr : &info);
         windowPending = false; windowIconBytes = 0;
         return 1;
     }
@@ -185,12 +188,10 @@ bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativ
     return connection->renderer.setOutputSurface(output, window, release);
 }
 
-void lorieConnectionCommand(LorieConnection* connection, uint32_t output, uint32_t window,
-        int operation, int x, int y, int detail, bool down) {
+void lorieSendOutputCommand(LorieConnection* connection, const LorieOutputCommand* command) {
     if (connection->fd < 0) return;
-    lorieEvent event{.output = {.t = EVENT_OUTPUT_COMMAND, .operation = (uint8_t)operation,
-            .down = (uint8_t)down, .output = output, .window = window,
-            .x = x, .y = y, .detail = (uint16_t)detail}};
+    lorieEvent event{.output = *command};
+    event.type = EVENT_OUTPUT_COMMAND;
     connection->sendAll(&event, sizeof(event));
 }
 

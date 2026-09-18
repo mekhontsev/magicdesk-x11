@@ -17,6 +17,7 @@
 #include "buffer.h"
 #include "data_exchange.h"
 #include "shared_lock.h"
+#include "output_command.h"
 
 
 #ifdef __cplusplus
@@ -133,12 +134,7 @@ typedef union {
         uint8_t t;
         uint32_t serial;
     } sync;
-    struct {
-        uint8_t t, operation, down;
-        uint32_t output, window;
-        int32_t x, y;
-        uint16_t detail;
-    } output;
+    LorieOutputCommand output;
     struct {
         uint8_t t;
         uint32_t output, window, width, height;

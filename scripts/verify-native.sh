@@ -23,6 +23,9 @@ timeout 15 "$work/queue"
 "$cxx" -std=c++17 -O2 -Wall -Wextra -UNDEBUG "$root/examples/command-queue-test.cpp" -o "$work/commands"
 timeout 15 "$work/lock"
 timeout 15 "$work/commands"
+"$cxx" -std=c++17 -O2 -Wall -Wextra -UNDEBUG "$root/examples/output-commands-test.cpp" \
+    "$src/lorie/output_commands.cpp" -o "$work/output-commands"
+timeout 15 "$work/output-commands"
 "$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/fullscreen-state-test.c" -o "$work/fullscreen"
 timeout 15 "$work/fullscreen"
 

@@ -20,6 +20,13 @@ on the creating Looper. Native callbacks run on that same thread and borrow
 their string/icon memory only for their duration. A data callback owns its FD.
 No per-frame callback into Java is required. The host supplies any JVM adapter.
 
+`embedded.h` exposes named output/input/window commands and structured window
+snapshots. `output_commands.cpp` alone translates their arguments to the private
+`output_command.h` wire representation. Commands use stack values and the existing
+connection FIFO, with no extra native heap allocation or per-command thread.
+Normalized pointer coordinates are clipped and quantized at this boundary.
+Platform keycode translation belongs to the host adapter, not the X server.
+
 Each output selects XID zero (the whole screen) or a Composite window family.
 Surface calls borrow ANativeWindow; the renderer retains its own reference and
 acknowledges replacement before the host can release its surface. Releasing an
@@ -112,6 +119,9 @@ Run `sh scripts/verify-native.sh` on Linux or Termux. Portable tests cover queue
 ordering/reentrancy, GPU notification isolation and buffer layout/Present sizing.
 They also cover contended/recursive shared locks, peer death, command backpressure,
 partial writes and queued-FD lifetime.
+`examples/output-commands-test.cpp` exercises the production command encoder:
+operation order, output/window IDs, pointer clipping/rounding, key/text commands
+and unsigned fullscreen request serials retain their existing wire semantics.
 Termux additionally tests the actual buffer implementation with fragmented IPC,
 FD cleanup, nonzero offsets and injected AHardwareBuffer lock failures. These are
 native fixtures, independent of Android Desktop self-tests.
@@ -124,10 +134,13 @@ the supported state hints, and yields if another window manager takes the
 selection. Leave it disabled for whole Linux desktops. The native bridge owns
 X protocol, not Android task policy.
 
-Window snapshots carry `hostManaged`, `fullscreenSerial`, `fullscreenRequested`
-and `fullscreenActual`. Initial fullscreen hints and `_NET_WM_STATE` add/remove/
-toggle messages create requests. `LORIE_OUTPUT_FULLSCREEN_CONFIRM` carries
-the XID, serial in `x`, and actual state in `down`. Only the current serial may
+Window callbacks supply `LorieWindowInfo` metadata and `LorieWindowManagement`,
+which separates management authority, the versioned `LorieWindowRequest`, and
+confirmed `LorieWindowState`. A null snapshot removes the given XID. Snapshot
+storage, titles and icon pixels are borrowed only during the callback.
+Initial fullscreen hints and `_NET_WM_STATE` add/remove/toggle messages create
+requests. `lorieConfirmWindowState` accepts the XID, request serial and actual
+state; only the private wire encoder packs these into command fields. Only the current serial may
 update `_NET_WM_STATE`; unrelated atoms are retained. Serials are allocated
 across the session to reject replies to destroyed/reused windows. Renderer
 reconnection republishes state without forgetting client intent. A host must
@@ -155,8 +168,8 @@ shares Composite/Damage ownership for repeated XIDs; each output's layers
 and frame arrive as one committed presentation. Families are bounded to 256
 layers and clipped to the main viewport.
 
-`LORIE_FOCUS` preserves active keyboard grabs and existing dialog focus,
-otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`. `LORIE_CLOSE_WINDOW` sends
+`lorieOutputFocus` preserves active keyboard grabs and existing dialog focus,
+otherwise respecting `WM_HINTS` and `WM_TAKE_FOCUS`. `lorieCloseWindow` sends
 `WM_DELETE_WINDOW`, falling back to X client termination if unsupported.
 Output destruction itself still releases only a presentation. The host
 decides when to close clients and retained/application sessions.
@@ -231,7 +244,7 @@ truncated properties, invalid sizes and allocation limits with a host C compiler
 
 ## Logical Density
 
-Pass the initial X11 density using Xorg's `-dpi`; `LORIE_OUTPUT_DPI` updates it
+Pass the initial X11 density using Xorg's `-dpi`; `lorieSetScreenDpi` updates it
 through the existing server command stream. The host selects density ownership
 when several Android windows share one X screen. The library does not inspect
 Android displays, poll tasks or scale captured pixels.
