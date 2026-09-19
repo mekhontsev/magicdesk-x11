@@ -243,7 +243,16 @@ Descriptors are independently owned by the receiving callback. Clipboard and XDN
 generation IDs and lifetimes. The native engine handles TARGETS, TIMESTAMP and
 INCR with a 128 MiB per-transfer limit, 16 pending requests and 30-second protocol
 deadlines. It does not access Android's ClipboardManager or content providers.
+Excess conversion requests receive a failed `SelectionNotify`, not a fatal
+core X error. Android can withhold URI access until drop while toolkits request
+preview data during hover; saturation must not terminate the receiving client.
+The output-input fixture covers saturation, request identity and slot reuse.
 
+Drop target hit testing respects X input/bounding shapes and unhittable windows;
+transparent compositor overlays must not obscure the receiving client.
+An initial negative XDND status is not final while its selection conversion is
+pending. Data completion renegotiates the final position before deciding the
+drop, with no timed retries. Leaving or closing the host cancels that negotiation.
 Android drag hosts publish a DRAG offer, then send ENTER/MOVE/LEAVE/DROP in output
 coordinates. Drop waits for target acceptance and reports FINISH. An X11 source
 offer includes its output identity: the host can start Android drag-and-drop,

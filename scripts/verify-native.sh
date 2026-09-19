@@ -7,7 +7,7 @@ trap 'rm -rf -- "$work"' 0
 cc=${CC:-clang}
 cxx=${CXX:-clang++}
 android_target=
-if [ "$(uname -o)" = Android ]; then android_target=--target=aarch64-linux-android34; fi
+if [ "$(uname -o)" = Android ]; then android_target='--target=aarch64-linux-android34 -L/system/lib64'; fi
 # Queue tests need pixman declarations only; no pixman code or version feature is used.
 sed 's/@PIXMAN_VERSION_[A-Z]*@/0/g' "$src/pixman/pixman/pixman-version.h.in" > "$work/pixman-version.h"
 "$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/buffer-layout-test.c" -o "$work/layout"

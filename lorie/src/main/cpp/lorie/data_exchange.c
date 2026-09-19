@@ -56,6 +56,7 @@ static Bool dragAccepted, dragPassthrough;
 static Bool dragPositionPending, dragDropPending;
 static Bool dragMoveQueued;
 static LorieDataEvent dragMove;
+static uint32_t dragDataRevision, dragPositionDataRevision;
 static unsigned dragVersion;
 static Window catcher, exportedSource;
 static uint32_t exportedOutput, exportedWindow;
@@ -67,6 +68,7 @@ static int (*previousConvertSelection)(ClientPtr);
 static void endExport(void);
 static void dropDrag(void);
 static void moveDrag(const LorieDataEvent* event);
+static void selectionFinished(const Transfer* transfer, Bool success);
 
 static Atom atom(const char* name) { return MakeAtom(name, strlen(name), TRUE); }
 static Atom selection(int channel) { return channel ? xdnd : clipboard; }
@@ -143,6 +145,7 @@ static void fail(Transfer* transfer) {
                 8, PropModeReplace, 0, NULL, TRUE);
     }
     release(transfer);
+    selectionFinished(transfer, FALSE);
 }
 
 static CARD32 expired(__unused OsTimerPtr timer, __unused CARD32 now, void* closure) {
@@ -261,7 +264,7 @@ static void receive(Transfer* transfer, Bool initial) {
 
 static Bool sendChunk(Transfer* transfer) {
     WindowPtr win = windowFor(transfer->requestor);
-    if (!win) { release(transfer); return FALSE; }
+    if (!win) { release(transfer); selectionFinished(transfer, FALSE); return FALSE; }
     unsigned char bytes[LORIE_DATA_CHUNK];
     size_t length = min(sizeof(bytes), transfer->size - transfer->offset);
     if (length && pread(transfer->fd, bytes, length, transfer->offset) != (ssize_t)length) { fail(transfer); return FALSE; }
@@ -270,7 +273,10 @@ static Bool sendChunk(Transfer* transfer) {
     int rc = dixChangeWindowProperty(serverClient, win, transfer->property, transfer->target,
             8, PropModeReplace, length, bytes, TRUE);
     movingProperty = FALSE;
-    if (transfer->incremental && (rc != Success || !length)) release(transfer);
+    if (transfer->incremental && (rc != Success || !length)) {
+        release(transfer);
+        selectionFinished(transfer, rc == Success);
+    }
     return rc == Success;
 }
 
@@ -352,17 +358,30 @@ static Bool own(int channel) {
     return TRUE;
 }
 
+static Transfer* outgoingTransfer(int channel, const xConvertSelectionReq* request) {
+    Transfer* t = allocate(FALSE, channel, ++requestSequence, offers[channel].generation);
+    if (!t) {
+        // Hover-time requests may precede Android's drop permission. Bounded
+        // backpressure refuses the selection; a core X error kills GTK clients.
+        Transfer rejected = {.channel = channel, .requestor = request->requestor,
+                .target = request->target, .time = request->time};
+        notify(&rejected, FALSE);
+        return NULL;
+    }
+    t->requestor = request->requestor;
+    t->target = request->target;
+    t->property = request->property ? request->property : request->target;
+    t->time = request->time;
+    return t;
+}
+
 static int convert(ClientPtr client) {
     REQUEST(xConvertSelectionReq);
     REQUEST_SIZE_MATCH(xConvertSelectionReq);
     int channel = stuff->selection == clipboard ? 0 : stuff->selection == xdnd ? 1 : -1;
     if (!enabled || channel < 0 || !offers[channel].local) return previousConvertSelection(client);
-    Transfer* t = allocate(FALSE, channel, ++requestSequence, offers[channel].generation);
-    if (!t) return BadAlloc;
-    t->requestor = stuff->requestor;
-    t->target = stuff->target;
-    t->property = stuff->property ? stuff->property : stuff->target;
-    t->time = stuff->time;
+    Transfer* t = outgoingTransfer(channel, stuff);
+    if (!t) return Success;
     WindowPtr win = NULL;
     int rc = dixLookupWindow(&win, t->requestor, client, DixSetAttrAccess);
     if (rc != Success || !ValidAtom(t->target) || !ValidAtom(t->property)) { fail(t); return Success; }
@@ -454,10 +473,16 @@ static Bool readTargets(Offer* offer, int fd) {
 }
 
 static Window childAt(WindowPtr parent, int x, int y) {
+    BoxRec box;
     for (WindowPtr child = parent->firstChild; child; child = child->nextSib) {
-        if (!child->mapped || child->drawable.id == bridge || child->drawable.id == catcher) continue;
+        if (!child->mapped || child->unhittable || child->drawable.id == bridge || child->drawable.id == catcher) continue;
         if (x >= child->drawable.x && y >= child->drawable.y &&
-                x < child->drawable.x + child->drawable.width && y < child->drawable.y + child->drawable.height) {
+                x < child->drawable.x + child->drawable.width && y < child->drawable.y + child->drawable.height
+                // Compositors have mapped full-screen overlays with empty input
+                // shapes. Match X's input hit testing, not just painted extents.
+                && (!wBoundingShape(child) || PointInBorderSize(child, x, y))
+                && (!wInputShape(child) || RegionContainsPoint(wInputShape(child),
+                        x - child->drawable.x, y - child->drawable.y, &box))) {
             Window nested = childAt(child, x, y);
             return nested ? nested : child->drawable.id;
         }
@@ -486,7 +511,8 @@ static Window destinationProxy(Window target) {
 }
 
 static void moveDrag(const LorieDataEvent* event) {
-    if (dragPositionPending) { dragMove = *event; dragMoveQueued = TRUE; return; }
+    dragMove = *event;
+    if (dragPositionPending) { dragMoveQueued = TRUE; return; }
     WindowPtr selected;
     int x, y;
     if (!lorieOutputPoint(event->output, event->window, event->x, event->y, &selected, &x, &y)) return;
@@ -509,16 +535,49 @@ static void moveDrag(const LorieDataEvent* event) {
     dragOutput = event->output;
     if (dragTarget) {
         dragPositionPending = TRUE;
+        dragPositionDataRevision = dragDataRevision;
         message(dragProxy, dragTarget, position, dragSource, 0,
                 ((uint32_t)x << 16) | (y & 0xffff), currentTime.milliseconds, copy);
     }
 }
 
+static Bool dragDataPending(void) {
+    for (unsigned i = 0; i < MAX_PENDING; i++) {
+        Transfer* t = &transfers[i];
+        if (t->used && !t->incoming && t->channel == 1 && t->generation == offers[1].generation) return TRUE;
+    }
+    return FALSE;
+}
+
+static void rejectDrag(void) {
+    dragDropPending = FALSE;
+    if (dragTarget) message(dragProxy, dragTarget, leave, dragSource, 0, 0, 0, 0);
+    emit(LORIE_DATA_FINISH, 1, 0, offers[1].generation, NULL, -1, dragOutput, dragTarget, 0);
+    dragTarget = None;
+}
+
 static void dropDrag(void) {
     if (dragPositionPending) { dragDropPending = TRUE; return; }
+    // Some targets initially reject the position while reading its selection.
+    // Re-negotiate only after data completion, never on a timer or a retry loop.
+    if (dragTarget && !dragAccepted) {
+        if (dragDataPending()) { dragDropPending = TRUE; return; }
+        if (dragDataRevision != dragPositionDataRevision) {
+            dragDropPending = TRUE;
+            moveDrag(&dragMove);
+            return;
+        }
+    }
     dragDropPending = FALSE;
     if (dragTarget && dragAccepted) message(dragProxy, dragTarget, drop, dragSource, 0, currentTime.milliseconds, 0, 0);
-    else emit(LORIE_DATA_FINISH, 1, 0, offers[1].generation, NULL, -1, dragOutput, dragTarget, 0);
+    else rejectDrag();
+}
+
+static void selectionFinished(const Transfer* transfer, Bool success) {
+    if (transfer->incoming || transfer->channel != 1 || transfer->generation != offers[1].generation || !dragTarget) return;
+    if (success) dragDataRevision++;
+    if (!dragDropPending) return;
+    if (success) dropDrag(); else rejectDrag();
 }
 
 static void releaseExportPointer(void) {
@@ -628,6 +687,7 @@ void lorieDataCommand(const LorieDataEvent* event, int fd) {
                     Bool success = sendChunk(t);
                     if (t->used) notify(t, success);
                     release(t);
+                    selectionFinished(t, success);
                 }
                 break;
             }
@@ -641,6 +701,7 @@ void lorieDataCommand(const LorieDataEvent* event, int fd) {
                 dixChangeWindowProperty(serverClient, win, typeList, XA_ATOM, 32, PropModeReplace, offer->count, offer->targets, TRUE);
             }
             dragTarget = None; dragOutput = event->output; dragAccepted = FALSE;
+            dragDataRevision = dragPositionDataRevision = 0;
             dragMoveQueued = dragDropPending = dragPositionPending = FALSE;
             break;
         case LORIE_DATA_MOVE: moveDrag(event); break;
