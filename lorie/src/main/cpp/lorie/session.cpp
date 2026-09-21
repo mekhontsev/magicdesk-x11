@@ -18,6 +18,9 @@ struct LorieConnection {
     uint32_t windowIcon[LORIE_WINDOW_ICON_PIXELS]{};
     size_t windowIconBytes = 0;
     bool windowPending = false;
+    uint32_t* cursorPixels = nullptr;
+    size_t cursorCapacity = 0, cursorBytes = 0;
+    bool cursorPending = false;
     LorieCommandQueue commands;
     LorieCallbacks callbacks;
     void* context;
@@ -25,6 +28,8 @@ struct LorieConnection {
     LorieConnection(const LorieCallbacks& cb, void* owner) : callbacks(cb), context(owner) {
         renderer.init();
     }
+
+    ~LorieConnection() { free(cursorPixels); }
 
     void disconnect(bool notify) {
         // Cancel a renderer lock wait before waiting for Surface/shared-state
@@ -42,6 +47,7 @@ struct LorieConnection {
         commands.clear();
         headerBytes = 0;
         windowPending = false; windowIconBytes = 0;
+        cursorPending = false; cursorBytes = 0;
         if (notify) callbacks.disconnected(context);
     }
 
@@ -89,6 +95,23 @@ struct LorieConnection {
         return 1;
     }
 
+    int receiveCursor() {
+        const auto& info = header.cursor.info;
+        size_t bytes = lorieCursorPixelCount(&info) * sizeof(uint32_t);
+        if (cursorBytes < bytes) {
+            ssize_t count = recv(fd, (char*)cursorPixels + cursorBytes, bytes - cursorBytes, MSG_DONTWAIT);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
+            if (count <= 0) { disconnect(true); return 0; }
+            cursorBytes += count;
+            if (cursorBytes != bytes) return 1;
+        }
+        if (callbacks.cursor) callbacks.cursor(context, header.cursor.output, header.cursor.window,
+                &info, bytes ? cursorPixels : nullptr);
+        cursorPending = false;
+        cursorBytes = 0;
+        return 1;
+    }
+
     int receive(int events) {
         if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) { disconnect(true); return 0; }
         if (events & ALOOPER_EVENT_OUTPUT) {
@@ -96,6 +119,7 @@ struct LorieConnection {
         }
         if (!(events & ALOOPER_EVENT_INPUT)) return 1;
         if (windowPending) return receiveWindow();
+        if (cursorPending) return receiveCursor();
         ssize_t count = recv(fd, (char*)&header + headerBytes, sizeof(header) - headerBytes, MSG_DONTWAIT);
         if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
         if (count <= 0) { disconnect(true); return 0; }
@@ -103,6 +127,18 @@ struct LorieConnection {
         if (headerBytes != sizeof(header)) return 1;
         headerBytes = 0;
         switch (header.type) {
+            case EVENT_OUTPUT_CURSOR: {
+                if (!header.cursor.output || !lorieCursorValid(&header.cursor.info)) { disconnect(true); return 0; }
+                size_t bytes = lorieCursorPixelCount(&header.cursor.info) * sizeof(uint32_t);
+                if (bytes > cursorCapacity) {
+                    void* pixels = realloc(cursorPixels, bytes);
+                    if (!pixels) { disconnect(true); return 0; }
+                    cursorPixels = (uint32_t*)pixels;
+                    cursorCapacity = bytes;
+                }
+                cursorPending = true;
+                return receiveCursor();
+            }
             case EVENT_DATA: {
                 int descriptor = header.data.hasFd ? ancil_recv_fd(fd) : -1;
                 if (header.data.hasFd && descriptor < 0) { disconnect(true); return 0; }

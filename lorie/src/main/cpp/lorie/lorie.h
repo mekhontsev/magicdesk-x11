@@ -18,6 +18,7 @@
 #include "data_exchange.h"
 #include "shared_lock.h"
 #include "output_command.h"
+#include "cursor_image.h"
 
 
 #ifdef __cplusplus
@@ -39,7 +40,11 @@ void lorieUnregisterBuffer(LorieBuffer* buffer);
 bool lorieConnectionAlive(void);
 void lorieSetRendererWakeupCond(int fd);
 void lorieSetGpuDoneFd(int fd);
-void lorieSetCursorVisible(Bool visible);
+struct _Cursor;
+void lorieCursorSet(struct _Cursor* cursor);
+void lorieCursorSelect(uint32_t output, uint32_t window);
+void lorieCursorRelease(uint32_t output);
+void lorieCursorPublish(void);
 void lorieSendSyncReply(uint32_t serial);
 
 __unused void rendererTestCapabilities(int* legacy_drawing, int* gpu_present_disabled);
@@ -76,6 +81,7 @@ typedef enum {
     EVENT_INSPECTION_NODE,
     EVENT_INSPECTION_DONE,
     EVENT_DATA,
+    EVENT_OUTPUT_CURSOR,
 } eventType;
 
 typedef union {
@@ -137,6 +143,7 @@ typedef union {
         uint32_t serial;
     } sync;
     LorieOutputCommand output;
+    struct { uint8_t t; uint32_t output, window; LorieCursorInfo info; } cursor;
     struct { uint8_t t; uint32_t serial; LorieInspectionNode node; } inspectionNode;
     struct { uint8_t t; uint32_t serial; LorieInspectionResult result; } inspectionDone;
     struct {
@@ -177,6 +184,7 @@ struct _Pixmap;
 LorieBuffer* lorieExportPixmap(struct _Pixmap* pixmap);
 void lorieSendOutputFrame(const lorieEvent* event);
 void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon);
+void lorieSendCursor(const lorieEvent* event, const uint32_t* pixels);
 
 typedef struct { int16_t x1, y1, x2, y2; } LorieGpuCopyRect;
 
@@ -195,7 +203,7 @@ typedef struct {
 struct lorie_shared_server_state {
     /*
      * Renderer and X server are separated into 2 different processes.
-     * Root window and cursor content and properties are shared across these 2 processes.
+     * Root window content and properties are shared across these 2 processes.
      * Reading/drawing root window in renderer the same time X server writes it can cause
      * tearing, texture garbling and other visual artifacts so we should block X server while we are drawing.
      */
@@ -241,15 +249,6 @@ struct lorie_shared_server_state {
     /* Needed to show FPS counter in logcat */
     volatile int renderedFrames;
 
-    struct {
-        // We should not allow updating cursor content the same time renderer draws it.
-        // locking the mutex protecting the root window can cause waiting for the frame to be drawn which is unacceptable
-        pthread_mutex_t lock; // initialized at X server side.
-        uint32_t x, y, xhot, yhot, width, height;
-        uint32_t bits[512*512]; // 1 megabyte should be enough for any cursor up to 512x512
-        // Signals to renderer to update cursor's texture or its coordinates
-        volatile uint8_t updated, moved, visible;
-    } cursor;
 };
 
 #ifdef __cplusplus

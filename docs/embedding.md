@@ -64,6 +64,12 @@ DISPLAY=:43 build/control-window XID unmap
 DISPLAY=:43 build/control-window XID map
 ```
 
+`cursor-window.c` exercises core font cursors, transparent ARGB and animated
+shapes while the pointer is stationary. Build the test client with
+`clang examples/cursor-window.c -o build/cursor-window -lX11 -lXcursor`.
+`scripts/verify-native.sh` checks cursor conversion, bounds, output ownership,
+coalescing and absence of cursor publications on ordinary pointer movement.
+
 `ahb-windows.c` exercises the upstream DRI3 AHardwareBuffer transport and GPU
 Present copies. In arm64 Termux build it against system EGL, not Mesa EGL:
 
@@ -273,7 +279,19 @@ or invoke a privileged file service.
 The host owns Android task placement, application discovery, IME and session
 lifecycle. It must not conflate an Android display ID, output ID and XID. Only
 one owner should request whole-screen geometry when multiple outputs select
-XID zero. Custom X cursor presentation remains host integration work.
+XID zero.
+
+Cursor shape changes use the optional `cursor` callback for the output that last
+delivered pointer input. The callback borrows straight ARGB pixels only for its
+duration, together with a content-pixel hotspot, or reports hidden/default.
+Shapes are bounded to 512x512; invalid sizes fall back to default. The X thread
+reports the inherited, unconfigured server cursor as the host default; an
+explicit client cursor or a Linux desktop's replacement root cursor retains its
+shape. Changes are coalesced before publication; pointer movement alone emits no cursor
+messages. The connection reads fragmented payloads into a reusable bounded
+buffer. Releasing the selected output drops cursor ownership. The renderer
+does not draw a cursor: the host replaces its existing pointer, scales it with
+the content and resets it on disconnect or output release.
 
 `examples/content-window.c` is a GTK clipboard/XDND fixture for text, HTML, PNG
 and files, including a 700,000-byte INCR text selection. Build it with

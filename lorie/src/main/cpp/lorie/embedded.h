@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include "window_role.h"
 #include "window_inspection.h"
+#include "cursor_image.h"
 
 typedef struct ANativeWindow ANativeWindow;
 
@@ -55,6 +56,8 @@ typedef struct {
     // One bounded read-only reply; borrowed nodes precede its completion on the connection Looper.
     void (*inspectionNode)(void*, uint32_t serial, const LorieInspectionNode*);
     void (*inspectionDone)(void*, uint32_t serial, const LorieInspectionResult*);
+    // Shape changes for the pointer's output, never coordinates. Straight ARGB pixels are borrowed.
+    void (*cursor)(void*, uint32_t output, uint32_t window, const LorieCursorInfo*, const uint32_t* pixels);
 } LorieCallbacks;
 
 enum LorieDataCommand {

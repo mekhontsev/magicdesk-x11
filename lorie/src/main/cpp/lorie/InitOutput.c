@@ -185,14 +185,12 @@ void OsVendorInit(void) {
     pthread_mutexattr_setpshared(&mutex_attr, PTHREAD_PROCESS_SHARED);
     pthread_mutexattr_settype(&mutex_attr, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&lorieScreen.state->lock, &mutex_attr);
-    pthread_mutex_init(&lorieScreen.state->cursor.lock, &mutex_attr);
     pthread_mutexattr_destroy(&mutex_attr);
-    lorieScreen.state->cursor.visible = TRUE;
 
 }
 
 // Queued from handleLorieEvents (input thread) to run on the main thread, i.e. the same thread that
-// signals rendererCond from lorieRedraw/lorieMoveCursor - so the swap and the unmap below can never race
+// signals rendererCond from lorieRedraw - so the swap and the unmap below can never race
 // a signal.
 static Bool lorieSetRendererWakeupCondWorkProc(__unused ClientPtr client, void* closure) {
     int fd = (int) (intptr_t) closure;
@@ -219,7 +217,7 @@ void lorieSetRendererWakeupCond(int fd) {
 }
 
 void lorieActivityConnected(void) {
-    pvfb->state->drawRequested = pvfb->state->cursor.updated = true;
+    pvfb->state->drawRequested = true;
     lorieSendSharedServerState(pvfb->stateFd);
     lorieRegisterBuffer(LORIE_BUFFER_FROM_PIXMAP(pScreenPtr->devPrivate));
 }
@@ -356,83 +354,15 @@ static Bool lorieCursorFromMouse(DeviceIntPtr pDev) {
     return !pDev || GetMaster(pDev, MASTER_POINTER) == inputInfo.pointer;
 }
 
-void lorieSetCursorVisible(Bool visible) {
-    pvfb->state->cursor.visible = visible;
-    pvfb->state->cursor.moved = TRUE;
-    pthread_cond_signal(rendererCond);
-}
-
-static void lorieMoveCursor(DeviceIntPtr pDev, unused ScreenPtr pScr, int x, int y) {
-    if (!lorieCursorFromMouse(pDev))
-        return;
-
-    pvfb->state->cursor.x = x;
-    pvfb->state->cursor.y = y;
-    pvfb->state->cursor.moved = TRUE;
-    // No need to explicitly lock the mutex, it will cause waiting for rendering to be finished.
-    // We are simply signaling the renderer in the case if it sleeps.
-    pthread_cond_signal(rendererCond);
-}
-
-static void lorieConvertCursor(CursorPtr pCurs, uint32_t *data) {
-    CursorBitsPtr bits = pCurs->bits;
-    if (bits->argb) {
-        for (int i = 0; i < bits->width * bits->height; i++) {
-            /* Convert bgra to rgba */
-            CARD32 p = bits->argb[i];
-            data[i] = (p & 0xFF000000) | ((p & 0x00FF0000) >> 16) | (p & 0x0000FF00) | ((p & 0x000000FF) << 16);
-        }
-    } else {
-        uint32_t d, fg, bg, *p;
-        int x, y, stride, i, bit;
-
-        p = data;
-        fg = ((pCurs->foreBlue & 0xff00) << 8) | (pCurs->foreGreen & 0xff00) | (pCurs->foreRed >> 8);
-        bg = ((pCurs->backBlue & 0xff00) << 8) | (pCurs->backGreen & 0xff00) | (pCurs->backRed >> 8);
-        stride = BitmapBytePad(bits->width);
-        for (y = 0; y < bits->height; y++)
-            for (x = 0; x < bits->width; x++) {
-                i = y * stride + x / 8;
-                bit = 1 << (x & 7);
-                d = (bits->source[i] & bit) ? fg : bg;
-                d = (bits->mask[i] & bit) ? d | 0xff000000 : 0x00000000;
-                *p++ = d;
-            }
-    }
-}
-
-static void lorieSetCursor(DeviceIntPtr pDev, unused ScreenPtr pScr, CursorPtr pCurs, int x0, int y0) {
-    if (!lorieCursorFromMouse(pDev))
-        return;
-
-    if (pCurs && (pCurs->bits->width >= 512 || pCurs->bits->height >= 512))
-        // We do not have enough memory allocated for such a big cursor, let's display default "X" cursor
-        pCurs = rootCursor;
-
-    CursorBitsPtr bits = pCurs ? pCurs->bits : NULL;
-
-    lorieServerLock(&pvfb->state->cursor.lock);
-    if (pCurs && bits) {
-        pvfb->state->cursor.xhot = bits->xhot;
-        pvfb->state->cursor.yhot = bits->yhot;
-        pvfb->state->cursor.width = bits->width;
-        pvfb->state->cursor.height = bits->height;
-        lorieConvertCursor(pCurs, pvfb->state->cursor.bits);
-    } else {
-        pvfb->state->cursor.xhot = pvfb->state->cursor.yhot = 0;
-        pvfb->state->cursor.width = pvfb->state->cursor.height = 0;
-    }
-    pvfb->state->cursor.updated = true;
-    pthread_mutex_unlock(&pvfb->state->cursor.lock);
-
-    lorieMoveCursor(NULL, NULL, x0, y0);
+static void lorieSetCursor(DeviceIntPtr pDev, unused ScreenPtr pScr, CursorPtr cursor, unused int x, unused int y) {
+    if (lorieCursorFromMouse(pDev)) lorieCursorSet(cursor);
 }
 
 static miPointerSpriteFuncRec loriePointerSpriteFuncs = {
     .RealizeCursor = TrueNoop,
     .UnrealizeCursor = TrueNoop,
     .SetCursor = lorieSetCursor,
-    .MoveCursor = lorieMoveCursor,
+    .MoveCursor = VoidNoop,
     .DeviceCursorInitialize = TrueNoop,
     .DeviceCursorCleanup = VoidNoop
 };
@@ -458,6 +388,7 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     pvfb->state->waitForNextFrame = false;
 
     if (lorieConnectionAlive()) lorieWindowModelRefresh();
+    if (lorieConnectionAlive()) lorieCursorPublish();
     if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
         return TRUE;
 
@@ -488,7 +419,7 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
         pvfb->state->drawRequested = TRUE;
     }
 
-    if (pvfb->state->drawRequested || pvfb->state->cursor.moved || pvfb->state->cursor.updated) {
+    if (pvfb->state->drawRequested) {
         pvfb->state->rootWindowTextureID = LorieBuffer_description(priv->buffer)->id;
 
         // Sending signal about pending root window changes to renderer thread.
@@ -654,7 +585,6 @@ static Bool lorieRRScreenSetSize(ScreenPtr pScreen, CARD16 width, CARD16 height,
 
     RRScreenSizeNotify(pScreen);
     update_desktop_dimensions();
-    pvfb->state->cursor.moved = TRUE;
 
     return TRUE;
 }

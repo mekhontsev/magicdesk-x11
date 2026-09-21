@@ -106,6 +106,7 @@ void lorieOutputWindowDestroyed(XID id) {
     for (OutputSelection* output = selections; output; output = output->next)
         if (output->window == id) {
             releaseInput(output);
+            lorieCursorRelease(output->id);
             output->dead = TRUE;
             output->changed = TRUE;
         }
@@ -122,6 +123,7 @@ static void damageDestroyed(__unused DamagePtr damage, void* closure) {
 
 static void releaseSelection(OutputSelection* output) {
     releaseInput(output);
+    lorieCursorRelease(output->id);
     if (output->ownsSize) for (OutputSelection* other = selections; other; other = other->next) {
         if (other != output && !other->dead && other->window == output->window && other->width > 0) {
             other->ownsSize = TRUE;
@@ -152,6 +154,7 @@ static void pruneImages(void) {
 }
 
 void lorieResetOutputs(void) {
+    lorieCursorSelect(0, 0);
     lorieWindowModelReset();
     while (selections) {
         OutputSelection* output = selections;
@@ -224,6 +227,7 @@ void lorieOutputCommand(const lorieEvent* event) {
         valuator_mask_zero(&mask);
         int x, y;
         if (!lorieOutputPoint(output->id, output->window, event->output.x, event->output.y, &window, &x, &y)) return;
+        lorieCursorSelect(output->id, output->window);
         valuator_mask_set_double(&mask, 0, x);
         valuator_mask_set_double(&mask, 1, y);
         QueuePointerEvents(lorieMouse, MotionNotify, 0, POINTER_ABSOLUTE | POINTER_SCREEN | POINTER_NORAW, &mask);

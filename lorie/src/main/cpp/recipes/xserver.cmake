@@ -291,6 +291,7 @@ add_library(LorieNative STATIC
         "lorie/shm/shmem.c"
         "lorie/data_exchange.c"
         "lorie/InitOutput.c"
+        "lorie/cursor.c"
         "lorie/InitInput.c"
         "lorie/InputXKB.c"
         "lorie/renderer.cpp"

@@ -38,12 +38,20 @@ timeout 15 "$work/placement"
 timeout 15 "$work/family"
 "$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/window-size-test.c" -o "$work/size"
 timeout 15 "$work/size"
+"$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG "$root/examples/cursor-image-test.c" -o "$work/cursor-image"
+timeout 15 "$work/cursor-image"
 "$cc" -std=c11 -O2 -Wall -Wextra -UNDEBUG -I"$src/libxcvt/include" \
     "$root/examples/screen-mode-test.c" "$src/libxcvt/lib/libxcvt.c" -lm -o "$work/screen-mode"
 timeout 15 "$work/screen-mode"
 
 # Output ownership and buffer tests compile the implementation against Android's ABI.
 if [ "$(uname -o)" = Android ]; then
+    "$cc" $android_target -std=gnu11 -O2 -Wall -Wextra -UNDEBUG \
+        -I"$work" -I"$root/examples/host-config" -I"$src/xserver/include" -I"$src/xserver/Xext" \
+        -I"$src/xserver/Xi" -I"$src/xorgproto/include" -I"$src/pixman/pixman" \
+        -I"$src/libxfont/include" -I"$src/xserver/render" \
+        "$root/examples/cursor-state-test.c" -o "$work/cursor-state"
+    timeout 15 "$work/cursor-state"
     "$cc" $android_target -std=gnu11 -O2 -Wall -Wextra -UNDEBUG -ffunction-sections -fdata-sections \
         -I"$work" -I"$root/examples/host-config" -I"$src/xserver/include" -I"$src/xserver/Xext" \
         -I"$src/xserver/Xi" -I"$src/xorgproto/include" -I"$src/pixman/pixman" \
