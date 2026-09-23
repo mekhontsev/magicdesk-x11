@@ -415,6 +415,12 @@ EGL swap; `presented` runs on the renderer thread, unlike connection callbacks.
 Adapters must marshal that receipt to their control thread and reject stale
 serials. Revocation releases outputs and input without terminating X clients.
 
+A shell output losing keyboard ownership dismisses its active popup grab by
+unmapping the grabbed override-redirect family member. The resulting UnmapNotify
+lets the toolkit cancel its own menu state; server-only grab release is not a
+client cancellation notification. Ordinary dialogs, the shell owner and other
+families are not unmapped. DND and tooltip surfaces are not popup-dismissal targets.
+
 ## Optional DMA Copy
 
 AHardwareBuffer sources retain upstream's deferred EGL Present queue. Linear

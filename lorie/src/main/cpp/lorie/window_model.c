@@ -469,6 +469,14 @@ void lorieWindowBlur(WindowPtr window) {
     for (unsigned i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
         DeviceIntPtr device = devices[i];
         GrabPtr grab = device->deviceGrab.grab;
+        WindowPtr popup = grab ? lorieWindowGrabPopup(grab->window, window, pScreenPtr->root, familyMember) : NULL;
+        if (popup && !hasAtom(popup, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DND")
+                && !hasAtom(popup, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_TOOLTIP")) {
+            // UnmapNotify communicates popup cancellation to the toolkit. A silent
+            // DeactivateGrab only changes server state and leaves client grabs stale.
+            UnmapWindow(popup, FALSE);
+            grab = device->deviceGrab.grab;
+        }
         if (grab && familyMember(grab->window, window)) device->deviceGrab.DeactivateGrab(device);
     }
     WindowPtr focus = keyboard->focus ? keyboard->focus->win : NULL;

@@ -48,3 +48,15 @@ static inline Bool lorieWindowFamilyContains(WindowPtr window, WindowPtr owner, 
     }
     return FALSE;
 }
+
+/* A popup grab may target an InputOnly child. Never dismiss its owner, a
+ * managed dialog, or an unrelated family's temporary window. */
+static inline WindowPtr lorieWindowGrabPopup(WindowPtr window, WindowPtr owner, WindowPtr root,
+        Bool (*belongs)(WindowPtr, WindowPtr)) {
+    for (unsigned remaining = 64; window && window != owner && window != root && remaining;
+            remaining--, window = window->parent) {
+        if (window->realized && window->overrideRedirect && window->drawable.class == InputOutput
+                && belongs(window, owner)) return window;
+    }
+    return NULL;
+}

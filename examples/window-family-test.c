@@ -46,6 +46,26 @@ static Bool inspectionMember(WindowPtr window, WindowPtr selected) {
     assert(selected == &owner);
     return window == &other || belongs(window); // Models a compositor-associated group popup.
 }
+static void popupGrabTest(void) {
+    nested.realized = TRUE;
+    nested.overrideRedirect = TRUE;
+    nested.drawable.class = InputOutput;
+    assert(lorieWindowGrabPopup(&nestedInput, &owner, &root, inspectionMember) == &nested);
+    assert(lorieWindowGrabPopup(&nested, &owner, &root, inspectionMember) == &nested);
+    assert(!lorieWindowGrabPopup(&dialogInput, &owner, &root, inspectionMember));
+    assert(!lorieWindowGrabPopup(&input, &owner, &root, inspectionMember));
+    assert(!lorieWindowGrabPopup(&owner, &owner, &root, inspectionMember));
+    assert(!lorieWindowGrabPopup(NULL, &owner, &root, inspectionMember));
+    nested.realized = FALSE;
+    assert(!lorieWindowGrabPopup(&nestedInput, &owner, &root, inspectionMember));
+    nested.realized = TRUE;
+    nestedOwner = &other;
+    assert(!lorieWindowGrabPopup(&nestedInput, &owner, &root, inspectionMember));
+    nestedOwner = &dialog;
+    nestedInput.parent = &nestedInput;
+    assert(!lorieWindowGrabPopup(&nestedInput, &owner, &root, inspectionMember));
+    nestedInput.parent = &nested;
+}
 static void emit(WindowPtr window, void* unused) {
     (void)unused;
     assert(inspectedCount < 16);
@@ -60,6 +80,7 @@ int main(void) {
     otherInput.parent = &other;
     dialogOwner = &owner;
     nestedOwner = &dialog;
+    popupGrabTest();
     assert(belongs(&owner));
     assert(belongs(&input));
     assert(belongs(&dialog));
