@@ -19,7 +19,7 @@
 #include "window_inspection_walk.h"
 
 extern ScreenPtr pScreenPtr;
-extern DeviceIntPtr lorieKeyboard;
+extern DeviceIntPtr lorieKeyboard, lorieMouse;
 
 typedef struct WindowRecord {
     struct WindowRecord* next;
@@ -38,6 +38,7 @@ static RealizeWindowProcPtr realize;
 static UnrealizeWindowProcPtr unrealize;
 static PositionWindowProcPtr position;
 static RestackWindowProcPtr restack;
+static SetShapeProcPtr shape;
 static DestroyWindowProcPtr destroy;
 static int (*previousSendEvent)(ClientPtr);
 static XID managerWindow;
@@ -341,6 +342,7 @@ static int sendEvent(ClientPtr client) {
 
 static void managerChanged(__unused CallbackListPtr* list, __unused void* data, void* args) {
     SelectionInfoRec* info = args;
+    lorieShellGeometryChanged();
     if (!managerWindow || info->selection->selection != managerSelection) return;
     Bool destroyed = info->kind == SelectionWindowDestroy;
     if (!destroyed && (info->kind != SelectionSetOwner || info->selection->window == managerWindow)) return;
@@ -354,6 +356,12 @@ static void managerChanged(__unused CallbackListPtr* list, __unused void* data, 
     if (!destroyed) FreeResource(old, RT_NONE);
     for (WindowRecord* record = records; record; record = record->next) record->changed = TRUE;
     dirty = TRUE;
+}
+
+Bool lorieWindowManagerExternal(void) {
+    Selection* selection = NULL;
+    int found = dixLookupSelection(&selection, atom("WM_S0"), serverClient, DixReadAccess);
+    return found == Success && selection->window != None && selection->window != managerWindow;
 }
 
 void lorieWindowManagerReady(void) {
@@ -382,7 +390,6 @@ void lorieWindowManagerReady(void) {
     selection->window = managerWindow;
     selection->pWin = owner;
     selection->client = serverClient;
-    if (!AddCallback(&SelectionCallback, managerChanged, NULL)) FatalError("Cannot observe X11 WM ownership\n");
     SelectionInfoRec info = {selection, serverClient, SelectionSetOwner};
     CallCallbacks(&SelectionCallback, &info);
     CARD32 id = managerWindow;
@@ -450,6 +457,23 @@ void lorieWindowFocus(WindowPtr window) {
             || !(((CARD32*)hints->data)[0] & 1) || ((CARD32*)hints->data)[1];
     if (accepts) SetInputFocus(serverClient, keyboard, window->drawable.id, RevertToParent, CurrentTime, FALSE);
     if (hasAtom(window, "WM_PROTOCOLS", "WM_TAKE_FOCUS")) clientMessage(window, "WM_TAKE_FOCUS");
+    lorieShellGeometryChanged();
+}
+
+void lorieWindowBlur(WindowPtr window) {
+    if (!window) return;
+    DeviceIntPtr keyboard = GetMaster(lorieKeyboard, KEYBOARD_OR_FLOAT);
+    DeviceIntPtr devices[] = {keyboard, GetMaster(lorieMouse, POINTER_OR_FLOAT), lorieKeyboard, lorieMouse};
+    // An Android focus loss ends this shell family's grabs, never a different client's grab.
+    // Release first so FocusOut is delivered normally, not suppressed as NotifyWhileGrabbed.
+    for (unsigned i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
+        DeviceIntPtr device = devices[i];
+        GrabPtr grab = device->deviceGrab.grab;
+        if (grab && familyMember(grab->window, window)) device->deviceGrab.DeactivateGrab(device);
+    }
+    WindowPtr focus = keyboard->focus ? keyboard->focus->win : NULL;
+    if (focus && focus != PointerRootWin && focus != NoneWin && lorieWindowBelongsTo(focus, window))
+        SetInputFocus(serverClient, keyboard, None, RevertToNone, CurrentTime, FALSE);
 }
 
 static void propertyChanged(CallbackListPtr* list, void* closure, void* data) {
@@ -499,6 +523,7 @@ static Bool onPosition(WindowPtr w, int x, int y) {
 }
 static void onRestack(WindowPtr w, WindowPtr old) {
     dirty = TRUE;
+    lorieShellGeometryChanged();
     ScreenPtr screen = w->drawable.pScreen;
     screen->RestackWindow = restack;
     if (screen->RestackWindow) screen->RestackWindow(w, old);
@@ -506,12 +531,23 @@ static void onRestack(WindowPtr w, WindowPtr old) {
     screen->RestackWindow = onRestack;
 }
 
+static void onShape(WindowPtr window, int kind) {
+    ScreenPtr screen = window->drawable.pScreen;
+    screen->SetShape = shape;
+    if (screen->SetShape) screen->SetShape(window, kind);
+    shape = screen->SetShape;
+    screen->SetShape = onShape;
+    lorieShellGeometryChanged();
+}
+
 void lorieWindowModelInit(ScreenPtr screen) {
+    if (!AddCallback(&SelectionCallback, managerChanged, NULL)) FatalError("Cannot observe X11 WM ownership\n");
     previousSendEvent = ProcVector[X_SendEvent]; ProcVector[X_SendEvent] = sendEvent;
     realize = screen->RealizeWindow; screen->RealizeWindow = onRealize;
     unrealize = screen->UnrealizeWindow; screen->UnrealizeWindow = onUnrealize;
     destroy = screen->DestroyWindow; screen->DestroyWindow = onDestroy;
     position = screen->PositionWindow; screen->PositionWindow = onPosition;
     restack = screen->RestackWindow; screen->RestackWindow = onRestack;
+    shape = screen->SetShape; screen->SetShape = onShape;
     AddCallback(&PropertyStateCallback, propertyChanged, NULL);
 }

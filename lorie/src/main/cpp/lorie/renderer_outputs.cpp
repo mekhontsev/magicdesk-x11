@@ -141,13 +141,18 @@ void Renderer::drawOutputs() {
         glDisable(GL_SCISSOR_TEST);
         int width = ANativeWindow_getWidth(draw.window), height = ANativeWindow_getHeight(draw.window);
         glViewport(0, 0, width, height);
-        glClearColor(0, 0, 0, 1);
+        glClearColor(0, 0, 0, frame.presentation ? 0 : 1);
         glClear(GL_COLOR_BUFFER_BIT);
+        bool complete = frame.width && frame.height && draw.layerCount;
         if (frame.width && frame.height) {
+            int contentWidth = frame.presentation ? frame.viewport.right - frame.viewport.left : frame.width;
+            int contentHeight = frame.presentation ? frame.viewport.bottom - frame.viewport.top : frame.height;
+            int originX = frame.presentation ? frame.viewport.left : 0;
+            int originY = frame.presentation ? frame.viewport.top : 0;
             float x = 1.f, y = 1.f;
-            if ((int64_t)width * frame.height > (int64_t)height * frame.width)
-                x = (float)height * frame.width / (width * (float)frame.height);
-            else y = (float)width * frame.height / (height * (float)frame.width);
+            if ((int64_t)width * contentHeight > (int64_t)height * contentWidth)
+                x = (float)height * contentWidth / (width * (float)contentHeight);
+            else y = (float)width * contentHeight / (height * (float)contentWidth);
             glEnable(GL_SCISSOR_TEST);
             glScissor((int)((1.f - x) * width / 2), (int)((1.f - y) * height / 2),
                     (int)(x * width), (int)(y * height));
@@ -156,15 +161,15 @@ void Renderer::drawOutputs() {
                 pthread_spin_lock(&bufferLock);
                 LorieBuffer* buffer = LorieBufferList_findById(&buffers, layer.bufferId);
                 pthread_spin_unlock(&bufferLock);
-                if (!buffer) continue;
+                if (!buffer) { complete = false; continue; }
                 const auto* desc = LorieBuffer_description(buffer);
                 LorieBuffer_bindTexture(buffer);
                 float right = desc->type == LORIEBUFFER_FD ? (float)desc->width / desc->stride : 1.f;
                 if (layer.alpha) { glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); }
                 else glDisable(GL_BLEND);
-                drawRegion(0, -x + 2*x*layer.x/frame.width, -y + 2*y*layer.y/frame.height,
-                        -x + 2*x*(layer.x + (float)layer.width)/frame.width,
-                        -y + 2*y*(layer.y + (float)layer.height)/frame.height,
+                drawRegion(0, -x + 2*x*(layer.x-originX)/contentWidth, -y + 2*y*(layer.y-originY)/contentHeight,
+                        -x + 2*x*(layer.x-originX + (float)layer.width)/contentWidth,
+                        -y + 2*y*(layer.y-originY + (float)layer.height)/contentHeight,
                         0, 0, right, 1, LorieBuffer_isRgba(buffer));
             }
             glDisable(GL_BLEND);
@@ -177,11 +182,19 @@ void Renderer::drawOutputs() {
             eglDestroySyncKHR(egl_display, fence);
         } else glFinish();
         pthread_mutex_unlock(&state->lock);
-        eglSwapBuffers(egl_display, draw.surface);
+        bool swapped = eglSwapBuffers(egl_display, draw.surface);
+        bool acknowledge = false;
         pthread_mutex_lock(&stateLock);
         for (Output* output = outputs; output; output = output->next)
-            if (output->id == draw.id) { output->drawnRevision = frame.revision; break; }
+            if (output->id == draw.id) {
+                output->drawnRevision = frame.revision;
+                acknowledge = frame.presentation && complete && output->presented != frame.presentation;
+                if (acknowledge) output->presented = frame.presentation;
+                break;
+            }
         pthread_mutex_unlock(&stateLock);
+        if (acknowledge && presentationCallback)
+            presentationCallback(presentationContext, draw.id, frame.presentation, swapped);
         rendered = true;
         state->renderedFrames++;
     }

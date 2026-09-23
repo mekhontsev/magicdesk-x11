@@ -397,6 +397,24 @@ as a session command:
 clang examples/density-window.c -o build/density-window $(pkg-config --cflags --libs gtk+-3.0)
 ```
 
+## Shell Surfaces
+
+`lorieConfigureShell` explicitly admits one revocable owner and root geometry.
+It refuses an external WM selection; later guest-WM ownership revokes admission.
+The native engine does not select an Android workspace or claim WM ownership for
+this operation. DOCK/DESKTOP surfaces are published separately through bounded
+`LorieShellInfo` snapshots: root placement, owner-relative painted/input family,
+mapped lifetime, and twelve unsigned EWMH strut values. Metadata discovery does
+not require a render Surface. Property, map/unmap, shape and geometry events mark
+the catalog dirty; unchanged snapshots do not produce callbacks.
+
+`lorieOutputBindShell` borrows a shell family without owning client geometry.
+`loriePresentShell` supplies a viewport and presentation serial. The renderer
+preserves transparent pixels and reports submission after a matching successful
+EGL swap; `presented` runs on the renderer thread, unlike connection callbacks.
+Adapters must marshal that receipt to their control thread and reject stale
+serials. Revocation releases outputs and input without terminating X clients.
+
 ## Optional DMA Copy
 
 AHardwareBuffer sources retain upstream's deferred EGL Present queue. Linear

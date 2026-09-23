@@ -298,6 +298,7 @@ add_library(LorieNative STATIC
         "lorie/renderer_outputs.cpp"
         "lorie/window_outputs.c"
         "lorie/window_model.c"
+        "lorie/window_shell.c"
         "lorie/density.c"
         "lorie/session.cpp"
         "lorie/output_commands.cpp"

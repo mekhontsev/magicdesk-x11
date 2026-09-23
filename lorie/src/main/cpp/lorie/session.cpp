@@ -21,11 +21,16 @@ struct LorieConnection {
     uint32_t* cursorPixels = nullptr;
     size_t cursorCapacity = 0, cursorBytes = 0;
     bool cursorPending = false;
+    LorieShellInfo shellInfo{};
+    size_t shellBytes = 0;
+    bool shellPending = false;
     LorieCommandQueue commands;
     LorieCallbacks callbacks;
     void* context;
 
     LorieConnection(const LorieCallbacks& cb, void* owner) : callbacks(cb), context(owner) {
+        renderer.presentationCallback = cb.presented;
+        renderer.presentationContext = owner;
         renderer.init();
     }
 
@@ -48,6 +53,7 @@ struct LorieConnection {
         headerBytes = 0;
         windowPending = false; windowIconBytes = 0;
         cursorPending = false; cursorBytes = 0;
+        shellPending = false; shellBytes = 0;
         if (notify) callbacks.disconnected(context);
     }
 
@@ -112,6 +118,21 @@ struct LorieConnection {
         return 1;
     }
 
+    int receiveShell() {
+        if (!header.shell.removed) {
+            ssize_t count = recv(fd, (char*)&shellInfo + shellBytes, sizeof(shellInfo) - shellBytes, MSG_DONTWAIT);
+            if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
+            if (count <= 0) { disconnect(true); return 0; }
+            shellBytes += count;
+            if (shellBytes != sizeof(shellInfo)) return 1;
+            if (shellInfo.inputCount > LORIE_SHELL_INPUT_LIMIT) { disconnect(true); return 0; }
+        }
+        if (callbacks.shell) callbacks.shell(context, header.shell.owner, header.shell.window,
+                header.shell.removed ? nullptr : &shellInfo);
+        shellBytes = 0; shellPending = false;
+        return 1;
+    }
+
     int receive(int events) {
         if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) { disconnect(true); return 0; }
         if (events & ALOOPER_EVENT_OUTPUT) {
@@ -120,6 +141,7 @@ struct LorieConnection {
         if (!(events & ALOOPER_EVENT_INPUT)) return 1;
         if (windowPending) return receiveWindow();
         if (cursorPending) return receiveCursor();
+        if (shellPending) return receiveShell();
         ssize_t count = recv(fd, (char*)&header + headerBytes, sizeof(header) - headerBytes, MSG_DONTWAIT);
         if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
         if (count <= 0) { disconnect(true); return 0; }
@@ -127,6 +149,10 @@ struct LorieConnection {
         if (headerBytes != sizeof(header)) return 1;
         headerBytes = 0;
         switch (header.type) {
+            case EVENT_OUTPUT_SHELL: shellPending = true; return receiveShell();
+            case EVENT_SHELL_STATE:
+                if (callbacks.shellState) callbacks.shellState(context, header.shell.owner, header.shell.available);
+                break;
             case EVENT_OUTPUT_CURSOR: {
                 if (!header.cursor.output || !lorieCursorValid(&header.cursor.info)) { disconnect(true); return 0; }
                 size_t bytes = lorieCursorPixelCount(&header.cursor.info) * sizeof(uint32_t);

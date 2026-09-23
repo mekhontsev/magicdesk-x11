@@ -388,7 +388,11 @@ static Bool lorieRedraw(__unused ClientPtr pClient, __unused void *closure) {
     pvfb->state->waitForNextFrame = false;
 
     if (lorieConnectionAlive()) lorieWindowModelRefresh();
-    if (lorieConnectionAlive()) lorieCursorPublish();
+    if (lorieConnectionAlive()) {
+        lorieCursorPublish();
+        // Catalog discovery must not depend on a viewer Surface: it creates the shell hosts.
+        lorieShellRefresh();
+    }
     if (!lorieConnectionAlive() || !pvfb->state->surfaceAvailable)
         return TRUE;
 

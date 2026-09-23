@@ -164,7 +164,6 @@ ANativeWindow* Renderer::createDefaultWindow() {
 void* Renderer::initThread() {
     EGLint major, minor;
     EGLint numConfigs;
-    EGLint *const alphaAttrib = &configAttribs[11];
 
     pthread_setname_np(pthread_self(), "LorieRendererThread");
 
@@ -178,9 +177,9 @@ void* Renderer::initThread() {
     log("Xlorie: Initialized EGL version %d.%d\n", major, minor);
     eglBindAPI(EGL_OPENGL_ES_API);
 
-    if (eglChooseConfig(egl_display, configAttribs, &cfg, 1, &numConfigs) != EGL_TRUE &&
-        (*alphaAttrib = 8) &&
-        eglChooseConfig(egl_display, configAttribs, &cfg, 1, &numConfigs) != EGL_TRUE)
+    // Shell families contain transparent gaps. Ordinary outputs still clear to opaque black.
+    configAttribs[11] = 8;
+    if (eglChooseConfig(egl_display, configAttribs, &cfg, 1, &numConfigs) != EGL_TRUE || numConfigs < 1)
         return printEglError("eglChooseConfig failed", __LINE__);
 
     ctx = eglCreateContext(egl_display, cfg, nullptr, ctxattribs);

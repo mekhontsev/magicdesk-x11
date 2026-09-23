@@ -32,6 +32,9 @@ typedef struct OutputSelection {
     uint32_t id;
     XID window;
     Bool changed, seen, dead, resizePending, geometryPending, ownsSize;
+    Bool shell;
+    LorieShellRect viewport;
+    uint32_t presentation;
     int width, height;
     int contentWidth, contentHeight;
     uint8_t keys[32], buttons;
@@ -89,19 +92,23 @@ Bool lorieOutputPoint(uint32_t id, uint32_t xid, int x, int y, WindowPtr* select
         WindowPtr window = pScreenPtr->root;
         if (xid && dixLookupWindow(&window, xid, serverClient, DixReadAccess) != Success) return FALSE;
         *selected = window;
-        *rootX = lorieOutputAxis(x, window->drawable.x, output->contentWidth);
-        *rootY = lorieOutputAxis(y, window->drawable.y, output->contentHeight);
+        *rootX = lorieOutputAxis(x, window->drawable.x + (output->shell ? output->viewport.left : 0),
+                output->shell ? output->viewport.right - output->viewport.left : output->contentWidth);
+        *rootY = lorieOutputAxis(y, window->drawable.y + (output->shell ? output->viewport.top : 0),
+                output->shell ? output->viewport.bottom - output->viewport.top : output->contentHeight);
         return TRUE;
     }
     return FALSE;
 }
 
 void lorieOutputGeometryChanged(void) {
+    lorieShellGeometryChanged();
     for (OutputSelection* output = selections; output; output = output->next)
         if (output->window) output->geometryPending = TRUE;
 }
 
 void lorieOutputWindowDestroyed(XID id) {
+    lorieShellGeometryChanged();
     // Output ownership ends with the resource, even when its XID is immediately reused.
     for (OutputSelection* output = selections; output; output = output->next)
         if (output->window == id) {
@@ -154,6 +161,7 @@ static void pruneImages(void) {
 }
 
 void lorieResetOutputs(void) {
+    lorieShellReset();
     lorieCursorSelect(0, 0);
     lorieWindowModelReset();
     while (selections) {
@@ -167,6 +175,10 @@ void lorieResetOutputs(void) {
 
 void lorieOutputCommand(const lorieEvent* event) {
     if (!pScreenPtr || !pScreenPtr->root) return;
+    if (event->output.operation == LORIE_OUTPUT_SHELL) {
+        lorieShellConfigure(event->output.output, event->output.x, event->output.y);
+        return;
+    }
     if (event->output.operation == LORIE_OUTPUT_OBSERVE) { lorieWindowModelObserve(); return; }
     if (event->output.operation == LORIE_OUTPUT_INSPECT) {
         lorieWindowInspect(event->output.output, event->output.window, event->output.detail);
@@ -191,10 +203,12 @@ void lorieOutputCommand(const lorieEvent* event) {
     }
     if (event->output.operation == LORIE_OUTPUT_BIND) {
         if (output) { *link = output->next; releaseSelection(output); }
+        if (event->output.detail && !lorieShellWindow(event->output.window)) return;
         output = calloc(1, sizeof(*output));
         if (!output) return;
         output->id = event->output.output;
         output->window = event->output.window;
+        output->shell = event->output.detail != 0;
         output->changed = TRUE;
         output->geometryPending = TRUE;
         output->next = *link;
@@ -202,7 +216,16 @@ void lorieOutputCommand(const lorieEvent* event) {
         return;
     }
     if (!output || output->dead || output->window != event->output.window) return;
+    if (output->shell && !lorieShellWindow(output->window)) { releaseInput(output); output->dead = TRUE; output->changed = TRUE; return; }
+    if (event->output.operation == LORIE_OUTPUT_VIEWPORT) {
+        LorieShellRect v = event->output.viewport;
+        if (!output->shell || !event->output.serial || v.left >= v.right || v.top >= v.bottom ||
+                v.left < -16384 || v.top < -16384 || v.right > 16384 || v.bottom > 16384) return;
+        output->viewport = v; output->presentation = event->output.serial; output->changed = TRUE;
+        return;
+    }
     if (event->output.operation == LORIE_OUTPUT_RESIZE) {
+        if (output->shell) return;
         if (event->output.x < 1 || event->output.y < 1 ||
                 event->output.x > LORIE_WINDOW_SIZE_LIMIT || event->output.y > LORIE_WINDOW_SIZE_LIMIT) return;
         output->width = event->output.x;
@@ -217,8 +240,14 @@ void lorieOutputCommand(const lorieEvent* event) {
     WindowPtr window = pScreenPtr->root;
     if (output->window && dixLookupWindow(&window, output->window,
             serverClient, DixWriteAccess) != Success) return;
+    if (event->output.operation == LORIE_OUTPUT_BLUR) {
+        releaseInput(output);
+        if (output->window) lorieWindowBlur(window);
+        return;
+    }
     if (output->window && (event->output.operation == LORIE_OUTPUT_FOCUS ||
-            event->output.operation == LORIE_OUTPUT_KEY || event->output.operation == LORIE_OUTPUT_TEXT || event->output.down)) {
+            event->output.operation == LORIE_OUTPUT_KEY || event->output.operation == LORIE_OUTPUT_TEXT ||
+            (!output->shell && event->output.down))) {
         lorieWindowFocus(window);
     }
     if (event->output.operation == LORIE_OUTPUT_POINTER) {
@@ -274,7 +303,7 @@ static void placeTransient(WindowPtr window, void* closure) {
 void loriePrepareOutputs(void) {
     if (!pScreenPtr || !pScreenPtr->root) return;
     for (OutputSelection* output = selections; output; output = output->next) {
-        if ((!output->resizePending && !output->geometryPending) || output->dead) continue;
+        if ((!output->resizePending && !output->geometryPending) || output->dead || output->shell) continue;
         Bool resize = output->resizePending;
         output->resizePending = output->geometryPending = FALSE;
         WindowPtr window = pScreenPtr->root;
@@ -380,7 +409,8 @@ void loriePublishOutputs(struct lorie_shared_server_state* state) {
         output->layerCount = frame.count;
         memcpy(output->layers, frame.layers, frame.count * sizeof(lorieEvent));
         lorieEvent event = {.frame = {.t = EVENT_OUTPUT_FRAME, .output = output->id,
-                .window = output->window, .revision = ++output->revision}};
+                .window = output->window, .revision = ++output->revision,
+                .presentation = output->presentation, .viewport = output->viewport}};
         if (frame.count) {
             event.frame.width = window->drawable.width;
             event.frame.height = window->drawable.height;

@@ -78,6 +78,8 @@ typedef enum {
     EVENT_OUTPUT_LAYER,
     EVENT_OUTPUT_WINDOW,
     EVENT_OUTPUT_WINDOWS_DONE,
+    EVENT_OUTPUT_SHELL,
+    EVENT_SHELL_STATE,
     EVENT_INSPECTION_NODE,
     EVENT_INSPECTION_DONE,
     EVENT_DATA,
@@ -150,6 +152,8 @@ typedef union {
         uint8_t t;
         uint32_t output, window, width, height;
         uint64_t bufferId, revision;
+        uint32_t presentation;
+        LorieShellRect viewport;
     } frame;
     struct {
         uint8_t t, alpha;
@@ -164,6 +168,7 @@ typedef union {
         char title[256];
         char instance[128], className[128];
     } windowInfo;
+    struct { uint8_t t; uint32_t owner, window; uint8_t removed, available; } shell;
 } lorieEvent;
 
 #define LORIE_MAX_FAMILY_LAYERS 256
@@ -184,6 +189,12 @@ struct _Pixmap;
 LorieBuffer* lorieExportPixmap(struct _Pixmap* pixmap);
 void lorieSendOutputFrame(const lorieEvent* event);
 void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon);
+void lorieSendShellInfo(const lorieEvent* event, const LorieShellInfo* info);
+void lorieShellConfigure(uint32_t owner, int width, int height);
+void lorieShellRefresh(void);
+void lorieShellReset(void);
+void lorieShellGeometryChanged(void);
+Bool lorieShellWindow(XID window);
 void lorieSendCursor(const lorieEvent* event, const uint32_t* pixels);
 
 typedef struct { int16_t x1, y1, x2, y2; } LorieGpuCopyRect;
@@ -273,8 +284,11 @@ struct Renderer {
         lorieEvent layers[LORIE_MAX_FAMILY_LAYERS]{}, pendingLayers[LORIE_MAX_FAMILY_LAYERS]{};
         unsigned layerCount = 0, pendingCount = 0;
         uint64_t drawnRevision = 0;
+        uint32_t presented = 0;
     };
     Output* outputs = nullptr;
+    void (*presentationCallback)(void*, uint32_t, uint32_t, bool) = nullptr;
+    void* presentationContext = nullptr;
     bool setOutputSurface(uint32_t id, ANativeWindow* window, bool release);
     void setOutputFrame(const lorieEvent& event);
     bool outputSurfacesChanged() const;

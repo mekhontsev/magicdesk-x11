@@ -6,6 +6,7 @@
 #include "window_role.h"
 #include "window_inspection.h"
 #include "cursor_image.h"
+#include "shell_surface.h"
 
 typedef struct ANativeWindow ANativeWindow;
 
@@ -58,6 +59,10 @@ typedef struct {
     void (*inspectionDone)(void*, uint32_t serial, const LorieInspectionResult*);
     // Shape changes for the pointer's output, never coordinates. Straight ARGB pixels are borrowed.
     void (*cursor)(void*, uint32_t output, uint32_t window, const LorieCursorInfo*, const uint32_t* pixels);
+    void (*shell)(void*, uint32_t owner, uint32_t window, const LorieShellInfo*);
+    void (*shellState)(void*, uint32_t owner, bool available);
+    // Renderer-thread receipt, after the requested viewport has been submitted to EGL.
+    void (*presented)(void*, uint32_t output, uint32_t serial, bool success);
 } LorieCallbacks;
 
 enum LorieDataCommand {
@@ -74,12 +79,16 @@ bool lorieConnectionConnect(LorieConnection* connection, int ownedDescriptor);
 bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativeWindow* window, bool release);
 // All commands use the connection's one ordered, nonblocking queue.
 void lorieOutputBind(LorieConnection*, uint32_t output, uint32_t window);
+void lorieOutputBindShell(LorieConnection*, uint32_t output, uint32_t window);
+void lorieConfigureShell(LorieConnection*, uint32_t owner, int width, int height);
+void loriePresentShell(LorieConnection*, uint32_t output, uint32_t window, uint32_t serial, LorieShellRect viewport);
 void lorieOutputResize(LorieConnection*, uint32_t output, uint32_t window, int width, int height);
 // Finite coordinates normalized to content, excluding host letterboxing; clipped to [0,1]. Button 0 is motion.
 void lorieOutputPointer(LorieConnection*, uint32_t output, uint32_t window, float x, float y, uint16_t button, bool down);
 void lorieOutputKey(LorieConnection*, uint32_t output, uint32_t window, uint16_t xKeyCode, bool down);
 void lorieOutputText(LorieConnection*, uint32_t output, uint32_t window, uint32_t codePoint);
 void lorieOutputFocus(LorieConnection*, uint32_t output, uint32_t window);
+void lorieOutputBlur(LorieConnection*, uint32_t output, uint32_t window);
 void lorieOutputRelease(LorieConnection*, uint32_t output, uint32_t window);
 void lorieObserveWindows(LorieConnection*);
 void lorieInspectWindow(LorieConnection*, uint32_t serial, uint32_t window, uint16_t limit);

@@ -447,6 +447,10 @@ void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon) {
         sendData(icon, LORIE_WINDOW_ICON_PIXELS * sizeof(*icon));
 }
 
+void lorieSendShellInfo(const lorieEvent* event, const LorieShellInfo* info) {
+    if (sendData(event, sizeof(*event)) && info) sendData(info, sizeof(*info));
+}
+
 void lorieSendCursor(const lorieEvent* event, const uint32_t* pixels) {
     size_t count = lorieCursorPixelCount(&event->cursor.info);
     if (sendData(event, sizeof(*event)) && count) sendData(pixels, count * sizeof(*pixels));

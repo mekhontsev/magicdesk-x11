@@ -12,6 +12,18 @@ static void send(LorieConnection* connection, LorieOutputOperation operation, ui
 void lorieOutputBind(LorieConnection* c, uint32_t output, uint32_t window) {
     send(c, LORIE_OUTPUT_BIND, output, window);
 }
+void lorieOutputBindShell(LorieConnection* c, uint32_t output, uint32_t window) {
+    send(c, LORIE_OUTPUT_BIND, output, window, 0, 0, 1);
+}
+void lorieConfigureShell(LorieConnection* c, uint32_t owner, int width, int height) {
+    send(c, LORIE_OUTPUT_SHELL, owner, 0, width, height);
+}
+void loriePresentShell(LorieConnection* c, uint32_t output, uint32_t window, uint32_t serial, LorieShellRect viewport) {
+    LorieOutputCommand command{};
+    command.operation = LORIE_OUTPUT_VIEWPORT; command.output = output; command.window = window;
+    command.serial = serial; command.viewport = viewport;
+    lorieSendOutputCommand(c, &command);
+}
 void lorieOutputResize(LorieConnection* c, uint32_t output, uint32_t window, int width, int height) {
     send(c, LORIE_OUTPUT_RESIZE, output, window, width, height);
 }
@@ -27,6 +39,9 @@ void lorieOutputText(LorieConnection* c, uint32_t output, uint32_t window, uint3
 }
 void lorieOutputFocus(LorieConnection* c, uint32_t output, uint32_t window) {
     send(c, LORIE_OUTPUT_FOCUS, output, window);
+}
+void lorieOutputBlur(LorieConnection* c, uint32_t output, uint32_t window) {
+    send(c, LORIE_OUTPUT_BLUR, output, window);
 }
 void lorieOutputRelease(LorieConnection* c, uint32_t output, uint32_t window) {
     send(c, LORIE_OUTPUT_RELEASE, output, window);
