@@ -230,6 +230,14 @@ static void publishWindow(WindowPtr window) {
                 .fullscreenSerial = record->fullscreen.serial,
                 .fullscreenRequested = record->fullscreen.requested,
                 .fullscreenActual = record->fullscreen.actual}};
+        int minWidth = 1, minHeight = 1, maxWidth = LORIE_WINDOW_SIZE_LIMIT, maxHeight = LORIE_WINDOW_SIZE_LIMIT;
+        lorieWindowConstrainSize(window, &minWidth, &minHeight);
+        lorieWindowConstrainSize(window, &maxWidth, &maxHeight);
+        event.windowInfo.parent = reference(window, "WM_TRANSIENT_FOR");
+        event.windowInfo.width = window->drawable.width; event.windowInfo.height = window->drawable.height;
+        event.windowInfo.minWidth = minWidth; event.windowInfo.minHeight = minHeight;
+        event.windowInfo.maxWidth = maxWidth == LORIE_WINDOW_SIZE_LIMIT ? 0 : maxWidth;
+        event.windowInfo.maxHeight = maxHeight == LORIE_WINDOW_SIZE_LIMIT ? 0 : maxHeight;
         memcpy(event.windowInfo.title, title, sizeof(title));
         value = property(window, "WM_CLASS");
         if (value && value->data && value->size && value->type == XA_STRING && value->format == 8) {

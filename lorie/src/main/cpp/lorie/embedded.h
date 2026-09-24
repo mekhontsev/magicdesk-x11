@@ -44,6 +44,8 @@ typedef struct {
     bool mapped;
     LorieWindowRole role;
     LorieWindowManagement management;
+    uint32_t parent;
+    int width, height, minWidth, minHeight, maxWidth, maxHeight;
 } LorieWindowInfo;
 
 typedef struct {

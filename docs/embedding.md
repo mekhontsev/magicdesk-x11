@@ -29,6 +29,10 @@ Platform keycode translation belongs to the host adapter, not the X server.
 Window snapshots include the two `WM_CLASS` strings as bounded, untruncated
 ICCCM string values (empty when absent, malformed or oversized). Property changes
 republish metadata; launch correlation belongs to the host, not the engine.
+Snapshots also include current client dimensions, `WM_TRANSIENT_FOR` and
+validated minimum/maximum dimensions from `WM_NORMAL_HINTS`, in X pixel units.
+A zero maximum is unspecified. Android placement and decorations are not part
+of this contract.
 
 Each output selects XID zero (the whole screen) or a Composite window family.
 Surface calls borrow ANativeWindow; the renderer retains its own reference and

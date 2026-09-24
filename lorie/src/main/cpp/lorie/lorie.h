@@ -166,6 +166,7 @@ typedef union {
     struct {
         uint8_t t, removed, mapped, hasIcon;
         uint32_t window, fullscreenSerial;
+        uint32_t parent, width, height, minWidth, minHeight, maxWidth, maxHeight;
         uint8_t hostManaged, fullscreenRequested, fullscreenActual, role;
         char title[256];
         char instance[128], className[128];
