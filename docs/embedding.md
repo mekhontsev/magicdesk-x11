@@ -175,9 +175,21 @@ reconnection republishes state without forgetting client intent. A host must
 select one responder when multiple outputs view an XID. Window geometry still
 comes from the host Surface, never from an X-side fullscreen resize guess.
 
+`LorieWindowManagement.maximized` publishes independent horizontal/vertical
+request and actual bits with its own request serial. `lorieConfirmMaximized`
+updates the two EWMH maximization atoms while preserving unrelated state.
+Fullscreen and maximization serials use the same session-wide allocator.
+`windowGesture` delivers `_NET_WM_MOVERESIZE` pointer directions 0..8 only for
+an individually hosted output with the requested button pressed, plus cancel
+direction 11. Keyboard directions 9/10 are not implemented. Android owns the
+gesture geometry and terminal button release; the native bridge does not move
+the root window or guess Android task bounds.
+
 `examples/fullscreen-state-test.c` covers pending toggles, stale replies,
 rejection and manual restore. `control-window XID fullscreen 0|1|2` sends the
 real EWMH client message for end-to-end checks.
+The same client accepts `maximize 0|1|2 horizontal|vertical|both` and prints
+confirmed `_NET_WM_STATE` atoms with `info`.
 
 The window callbacks followed by `windowsCommitted` publish complete snapshots after reconciliation,
 never intermediate removals from a batch. Discovery follows X properties and

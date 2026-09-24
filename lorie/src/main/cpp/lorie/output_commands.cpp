@@ -60,3 +60,8 @@ void lorieSetScreenDpi(LorieConnection* c, int dpi) { send(c, LORIE_OUTPUT_DPI, 
 void lorieConfirmWindowState(LorieConnection* c, uint32_t window, uint32_t requestSerial, LorieWindowState actual) {
     send(c, LORIE_OUTPUT_FULLSCREEN_CONFIRM, 0, window, (int32_t)requestSerial, 0, 0, actual.fullscreen);
 }
+
+void lorieConfirmMaximized(LorieConnection* c, uint32_t window, uint32_t requestSerial, unsigned axes) {
+    if (axes & ~3u) return;
+    send(c, LORIE_OUTPUT_MAXIMIZED_CONFIRM, 0, window, (int32_t)requestSerial, (int32_t)axes);
+}

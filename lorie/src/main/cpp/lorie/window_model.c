@@ -26,6 +26,7 @@ typedef struct WindowRecord {
     XID id;
     Bool seen, mapped, changed, published, destroyed;
     LorieFullscreenState fullscreen;
+    LorieMaximizedState maximized;
     char title[256];
     Bool hasIcon;
     LorieWindowRole role;
@@ -43,11 +44,11 @@ static DestroyWindowProcPtr destroy;
 static int (*previousSendEvent)(ClientPtr);
 static XID managerWindow;
 static Atom managerSelection;
-static uint32_t fullscreenSerial;
+static uint32_t stateSerial;
 
-static uint32_t nextFullscreenSerial(void) {
-    if (++fullscreenSerial == 0) ++fullscreenSerial;
-    return fullscreenSerial;
+static uint32_t nextStateSerial(void) {
+    if (++stateSerial == 0) ++stateSerial;
+    return stateSerial;
 }
 
 static Atom atom(const char* name) { return MakeAtom(name, strlen(name), TRUE); }
@@ -198,7 +199,13 @@ static WindowRecord* recordFor(WindowPtr window) {
         records = record;
         if (managerWindow && hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_FULLSCREEN"))
             lorieFullscreenRequest(&record->fullscreen, 1);
-        record->fullscreen.serial = nextFullscreenSerial();
+        record->fullscreen.serial = nextStateSerial();
+        if (managerWindow) {
+            record->maximized.requested =
+                    (hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_MAXIMIZED_HORZ") ? LORIE_MAXIMIZED_HORIZONTAL : 0)
+                    | (hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_MAXIMIZED_VERT") ? LORIE_MAXIMIZED_VERTICAL : 0);
+        }
+        record->maximized.serial = nextStateSerial();
     }
     return record;
 }
@@ -228,6 +235,7 @@ static void publishWindow(WindowPtr window) {
         lorieEvent event = {.windowInfo = {.t = EVENT_OUTPUT_WINDOW, .mapped = record->mapped,
                 .window = record->id, .hasIcon = hasIcon, .role = role, .hostManaged = managerWindow != None,
                 .fullscreenSerial = record->fullscreen.serial,
+                .maximized = record->maximized,
                 .fullscreenRequested = record->fullscreen.requested,
                 .fullscreenActual = record->fullscreen.actual}};
         int minWidth = 1, minHeight = 1, maxWidth = LORIE_WINDOW_SIZE_LIMIT, maxHeight = LORIE_WINDOW_SIZE_LIMIT;
@@ -327,23 +335,65 @@ void lorieWindowFullscreenConfirm(XID id, uint32_t serial, Bool fullscreen) {
     free(atoms);
 }
 
+void lorieWindowMaximizedConfirm(XID id, uint32_t serial, unsigned axes) {
+    if (!managerWindow || (axes & ~3u)) return;
+    WindowPtr window = lookup(id);
+    WindowRecord* record = window ? recordFor(window) : NULL;
+    if (!record || serial != record->maximized.serial) return;
+    PropertyPtr previous = property(window, "_NET_WM_STATE");
+    unsigned long count = previous && previous->type == XA_ATOM && previous->format == 32 ? previous->size : 0;
+    CARD32* atoms = calloc(count + 2, sizeof(CARD32));
+    if (!atoms) return;
+    Atom horizontal = atom("_NET_WM_STATE_MAXIMIZED_HORZ"), vertical = atom("_NET_WM_STATE_MAXIMIZED_VERT");
+    unsigned long length = 0;
+    for (unsigned long i = 0; i < count; i++) {
+        CARD32 value = ((CARD32*)previous->data)[i];
+        if (value != horizontal && value != vertical) atoms[length++] = value;
+    }
+    if (axes & LORIE_MAXIMIZED_HORIZONTAL) atoms[length++] = horizontal;
+    if (axes & LORIE_MAXIMIZED_VERTICAL) atoms[length++] = vertical;
+    if (dixChangeWindowProperty(serverClient, window, atom("_NET_WM_STATE"), XA_ATOM, 32,
+            PropModeReplace, length, atoms, TRUE) == Success) {
+        lorieMaximizedConfirm(&record->maximized, serial, axes);
+        record->changed = dirty = TRUE;
+    }
+    free(atoms);
+}
+
 static int sendEvent(ClientPtr client) {
     REQUEST(xSendEventReq);
     REQUEST_SIZE_MATCH(xSendEventReq);
     xEvent* event = &stuff->event;
     if (managerWindow && stuff->destination == pScreenPtr->root->drawable.id &&
-            event->u.u.type == ClientMessage && event->u.u.detail == 32 &&
-            event->u.clientMessage.u.l.type == atom("_NET_WM_STATE")) {
-        Atom fullscreen = atom("_NET_WM_STATE_FULLSCREEN");
-        if (event->u.clientMessage.u.l.longs1 == fullscreen || event->u.clientMessage.u.l.longs2 == fullscreen) {
-            WindowPtr window = lookup(event->u.clientMessage.window);
-            WindowRecord* record = window ? recordFor(window) : NULL;
-            if (record && lorieFullscreenRequest(&record->fullscreen, event->u.clientMessage.u.l.longs0)) {
-                record->fullscreen.serial = nextFullscreenSerial();
-                record->changed = dirty = TRUE;
+            event->u.u.type == ClientMessage && event->u.u.detail == 32) {
+        WindowPtr window = lookup(event->u.clientMessage.window);
+        WindowRecord* record = window ? recordFor(window) : NULL;
+        if (event->u.clientMessage.u.l.type == atom("_NET_WM_MOVERESIZE")) {
+            unsigned direction = event->u.clientMessage.u.l.longs2;
+            if (record && (direction == 11 || (direction <= 8 &&
+                    lorieWindowGestureAllowed(record->id, event->u.clientMessage.u.l.longs3)))) {
+                lorieEvent gesture = {.windowGesture = {.t = EVENT_WINDOW_GESTURE, .window = record->id, .direction = direction}};
+                lorieSendOutputFrame(&gesture);
             }
             return Success;
         }
+        if (event->u.clientMessage.u.l.type != atom("_NET_WM_STATE")) return previousSendEvent(client);
+        Atom fullscreen = atom("_NET_WM_STATE_FULLSCREEN");
+        if (event->u.clientMessage.u.l.longs1 == fullscreen || event->u.clientMessage.u.l.longs2 == fullscreen) {
+            if (record && lorieFullscreenRequest(&record->fullscreen, event->u.clientMessage.u.l.longs0)) {
+                record->fullscreen.serial = nextStateSerial();
+                record->changed = dirty = TRUE;
+            }
+        }
+        Atom horizontal = atom("_NET_WM_STATE_MAXIMIZED_HORZ"), vertical = atom("_NET_WM_STATE_MAXIMIZED_VERT");
+        CARD32 first = event->u.clientMessage.u.l.longs1, second = event->u.clientMessage.u.l.longs2;
+        unsigned axes = ((first == horizontal || second == horizontal) ? LORIE_MAXIMIZED_HORIZONTAL : 0)
+                | ((first == vertical || second == vertical) ? LORIE_MAXIMIZED_VERTICAL : 0);
+        if (record && lorieMaximizedRequest(&record->maximized, event->u.clientMessage.u.l.longs0, axes)) {
+            record->maximized.serial = nextStateSerial();
+            record->changed = dirty = TRUE;
+        }
+        return Success;
     }
     return previousSendEvent(client);
 }
@@ -407,7 +457,8 @@ void lorieWindowManagerReady(void) {
     const char name[] = "MagicDesk";
     dixChangeWindowProperty(serverClient, owner, atom("_NET_WM_NAME"), atom("UTF8_STRING"), 8,
             PropModeReplace, sizeof(name) - 1, name, TRUE);
-    CARD32 supported[] = {check, atom("_NET_WM_STATE"), atom("_NET_WM_STATE_FULLSCREEN")};
+    CARD32 supported[] = {check, atom("_NET_WM_STATE"), atom("_NET_WM_STATE_FULLSCREEN"),
+            atom("_NET_WM_STATE_MAXIMIZED_HORZ"), atom("_NET_WM_STATE_MAXIMIZED_VERT"), atom("_NET_WM_MOVERESIZE")};
     dixChangeWindowProperty(serverClient, pScreenPtr->root, atom("_NET_SUPPORTED"), XA_ATOM, 32,
             PropModeReplace, ARRAY_SIZE(supported), supported, TRUE);
     xEvent event = {0};

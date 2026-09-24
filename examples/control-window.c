@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <xcb/xcb.h>
@@ -11,7 +12,7 @@ static xcb_atom_t atom(xcb_connection_t* c, const char* name) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "control-window XID info|map|unmap|destroy|raise|focus|geometry [x y width height]|fullscreen [0|1|2]\n"); return 2; }
+    if (argc < 3) { fprintf(stderr, "control-window XID info|map|unmap|destroy|raise|focus|geometry [x y width height]|fullscreen [0|1|2]|maximize [0|1|2] [horizontal|vertical|both]\n"); return 2; }
     xcb_connection_t* c = xcb_connect(NULL, NULL);
     if (xcb_connection_has_error(c)) return 1;
     xcb_window_t window = strtoul(argv[1], NULL, 0);
@@ -26,6 +27,17 @@ int main(int argc, char** argv) {
             printf("normal-hints flags=%u min=%ux%u\n", values[0], values[5], values[6]);
         }
         free(hints);
+        xcb_get_property_reply_t* state = xcb_get_property_reply(c,
+                xcb_get_property(c, 0, window, atom(c, "_NET_WM_STATE"), XCB_ATOM_ATOM, 0, 64), NULL);
+        if (state && state->format == 32) {
+            xcb_atom_t* values = xcb_get_property_value(state);
+            for (unsigned i = 0; i < state->value_len; i++) {
+                xcb_get_atom_name_reply_t* name = xcb_get_atom_name_reply(c, xcb_get_atom_name(c, values[i]), NULL);
+                if (name) printf("state=%.*s\n", xcb_get_atom_name_name_length(name), xcb_get_atom_name_name(name));
+                free(name);
+            }
+        }
+        free(state);
         xcb_get_input_focus_reply_t* focus = xcb_get_input_focus_reply(c, xcb_get_input_focus(c), NULL);
         if (focus) printf("focus=%u\n", focus->focus);
         free(focus);
@@ -48,13 +60,20 @@ int main(int argc, char** argv) {
         command = xcb_configure_window_checked(c, window, XCB_CONFIG_WINDOW_STACK_MODE, &above);
     }
     else if (!strcmp(argv[2], "focus")) command = xcb_set_input_focus_checked(c, XCB_INPUT_FOCUS_PARENT, window, XCB_CURRENT_TIME);
-    else if (!strcmp(argv[2], "fullscreen") && argc == 4) {
+    else if ((!strcmp(argv[2], "fullscreen") && argc == 4) || (!strcmp(argv[2], "maximize") && argc == 5)) {
         int action = atoi(argv[3]);
         if (action < 0 || action > 2) return 2;
         xcb_client_message_event_t event = {.response_type = XCB_CLIENT_MESSAGE, .format = 32,
                 .window = window, .type = atom(c, "_NET_WM_STATE")};
         event.data.data32[0] = action;
-        event.data.data32[1] = atom(c, "_NET_WM_STATE_FULLSCREEN");
+        if (!strcmp(argv[2], "fullscreen")) event.data.data32[1] = atom(c, "_NET_WM_STATE_FULLSCREEN");
+        else {
+            bool horizontal = !strcmp(argv[4], "horizontal") || !strcmp(argv[4], "both");
+            bool vertical = !strcmp(argv[4], "vertical") || !strcmp(argv[4], "both");
+            if (!horizontal && !vertical) return 2;
+            event.data.data32[1] = atom(c, horizontal ? "_NET_WM_STATE_MAXIMIZED_HORZ" : "_NET_WM_STATE_MAXIMIZED_VERT");
+            if (horizontal && vertical) event.data.data32[2] = atom(c, "_NET_WM_STATE_MAXIMIZED_VERT");
+        }
         event.data.data32[3] = 1;
         xcb_window_t root = xcb_setup_roots_iterator(xcb_get_setup(c)).data->root;
         command = xcb_send_event_checked(c, 0, root,

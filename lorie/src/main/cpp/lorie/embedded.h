@@ -9,6 +9,7 @@
 #include "shell_surface.h"
 #include "family_geometry.h"
 #include "graphics.h"
+#include "maximized_state.h"
 
 
 #ifdef __cplusplus
@@ -35,6 +36,7 @@ typedef struct {
     bool managed;
     LorieWindowRequest request;
     LorieWindowState actual;
+    LorieMaximizedState maximized;
 } LorieWindowManagement;
 typedef struct {
     const char* title;
@@ -67,6 +69,8 @@ typedef struct {
     void (*family)(void*, uint32_t output, const LorieFamilyGeometry*);
     // Renderer-thread receipt, after the requested viewport has been submitted to Android.
     void (*presented)(void*, uint32_t output, uint32_t serial, bool success);
+    // Client-decoration gestures, using EWMH directions 0..8 and 11 (cancel).
+    void (*windowGesture)(void*, uint32_t window, unsigned direction);
 } LorieCallbacks;
 
 enum LorieDataCommand {
@@ -101,6 +105,7 @@ void lorieInspectWindow(LorieConnection*, uint32_t serial, uint32_t window, uint
 void lorieCloseWindow(LorieConnection*, uint32_t window, bool force);
 void lorieSetScreenDpi(LorieConnection*, int dpi);
 void lorieConfirmWindowState(LorieConnection*, uint32_t window, uint32_t requestSerial, LorieWindowState actual);
+void lorieConfirmMaximized(LorieConnection*, uint32_t window, uint32_t requestSerial, unsigned axes);
 void lorieConnectionData(LorieConnection* connection, int operation, int channel,
         uint32_t serial, uint32_t offer, uint32_t output, uint32_t window,
         int x, int y, const char* type, int borrowedDescriptor);

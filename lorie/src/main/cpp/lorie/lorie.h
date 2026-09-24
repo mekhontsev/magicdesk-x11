@@ -79,6 +79,7 @@ typedef enum {
     EVENT_OUTPUT_LAYER,
     EVENT_OUTPUT_WINDOW,
     EVENT_OUTPUT_WINDOWS_DONE,
+    EVENT_WINDOW_GESTURE,
     EVENT_OUTPUT_SHELL,
     EVENT_SHELL_STATE,
     EVENT_INSPECTION_NODE,
@@ -166,11 +167,13 @@ typedef union {
     struct {
         uint8_t t, removed, mapped, hasIcon;
         uint32_t window, fullscreenSerial;
+        LorieMaximizedState maximized;
         uint32_t parent, width, height, minWidth, minHeight, maxWidth, maxHeight;
         uint8_t hostManaged, fullscreenRequested, fullscreenActual, role;
         char title[256];
         char instance[128], className[128];
     } windowInfo;
+    struct { uint8_t t; uint32_t window, direction; } windowGesture;
     struct { uint8_t t; uint32_t owner, window; uint8_t removed, available; } shell;
 } lorieEvent;
 

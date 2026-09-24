@@ -100,7 +100,8 @@ struct LorieConnection {
             .role = (LorieWindowRole)header.windowInfo.role,
             .management = {.managed = header.windowInfo.hostManaged != 0,
                 .request = {.serial = header.windowInfo.fullscreenSerial, .fullscreen = header.windowInfo.fullscreenRequested != 0},
-                .actual = {.fullscreen = header.windowInfo.fullscreenActual != 0}},
+                .actual = {.fullscreen = header.windowInfo.fullscreenActual != 0},
+                .maximized = header.windowInfo.maximized},
             .parent = header.windowInfo.parent,
             .width = (int)header.windowInfo.width, .height = (int)header.windowInfo.height,
             .minWidth = (int)header.windowInfo.minWidth, .minHeight = (int)header.windowInfo.minHeight,
@@ -201,6 +202,9 @@ struct LorieConnection {
                 break;
             }
             case EVENT_OUTPUT_WINDOWS_DONE: callbacks.windowsCommitted(context); break;
+            case EVENT_WINDOW_GESTURE:
+                if (callbacks.windowGesture) callbacks.windowGesture(context, header.windowGesture.window, header.windowGesture.direction);
+                break;
             case EVENT_INSPECTION_NODE:
                 header.inspectionNode.node.title[sizeof(header.inspectionNode.node.title) - 1] = 0;
                 callbacks.inspectionNode(context, header.inspectionNode.serial, &header.inspectionNode.node);

@@ -83,6 +83,14 @@ static void releaseInput(OutputSelection* output) {
     for (int button = 1; button <= 7; button++) outputButton(output, button, FALSE);
 }
 
+Bool lorieWindowGestureAllowed(XID window, unsigned button) {
+    if (button > 7) return FALSE;
+    for (OutputSelection* output = selections; output; output = output->next)
+        if (!output->dead && !borrowed(output) && output->window == window
+                && (button ? (output->buttons & (1u << button)) : output->buttons)) return TRUE;
+    return FALSE;
+}
+
 void lorieReleaseOutputButton(uint32_t id, uint32_t window, int button) {
     if (button < 1 || button > 7) return;
     for (OutputSelection* output = selections; output; output = output->next)
@@ -205,6 +213,10 @@ void lorieOutputCommand(const lorieEvent* event) {
     }
     if (event->output.operation == LORIE_OUTPUT_FULLSCREEN_CONFIRM) {
         lorieWindowFullscreenConfirm(event->output.window, (uint32_t)event->output.x, event->output.down);
+        return;
+    }
+    if (event->output.operation == LORIE_OUTPUT_MAXIMIZED_CONFIRM) {
+        lorieWindowMaximizedConfirm(event->output.window, (uint32_t)event->output.x, (unsigned)event->output.y);
         return;
     }
     if (!event->output.output) return;
