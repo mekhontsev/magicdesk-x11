@@ -450,6 +450,10 @@ void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon) {
 void lorieSendShellInfo(const lorieEvent* event, const LorieShellInfo* info) {
     if (sendData(event, sizeof(*event)) && info) sendData(info, sizeof(*info));
 }
+void lorieSendFamilyGeometry(uint32_t output, const LorieFamilyGeometry* info) {
+    lorieEvent event = {.shell = {.t = EVENT_OUTPUT_FAMILY, .owner = output}};
+    if (sendData(&event, sizeof(event))) sendData(info, sizeof(*info));
+}
 
 void lorieSendCursor(const lorieEvent* event, const uint32_t* pixels) {
     size_t count = lorieCursorPixelCount(&event->cursor.info);

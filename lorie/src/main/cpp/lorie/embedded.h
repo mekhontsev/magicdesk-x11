@@ -7,6 +7,7 @@
 #include "window_inspection.h"
 #include "cursor_image.h"
 #include "shell_surface.h"
+#include "family_geometry.h"
 
 typedef struct ANativeWindow ANativeWindow;
 
@@ -61,6 +62,7 @@ typedef struct {
     void (*cursor)(void*, uint32_t output, uint32_t window, const LorieCursorInfo*, const uint32_t* pixels);
     void (*shell)(void*, uint32_t owner, uint32_t window, const LorieShellInfo*);
     void (*shellState)(void*, uint32_t owner, bool available);
+    void (*family)(void*, uint32_t output, const LorieFamilyGeometry*);
     // Renderer-thread receipt, after the requested viewport has been submitted to EGL.
     void (*presented)(void*, uint32_t output, uint32_t serial, bool success);
 } LorieCallbacks;
@@ -80,6 +82,7 @@ bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativ
 // All commands use the connection's one ordered, nonblocking queue.
 void lorieOutputBind(LorieConnection*, uint32_t output, uint32_t window);
 void lorieOutputBindShell(LorieConnection*, uint32_t output, uint32_t window);
+void lorieOutputBindDependents(LorieConnection*, uint32_t output, uint32_t window, uint32_t parent);
 void lorieConfigureShell(LorieConnection*, uint32_t owner, int width, int height);
 void loriePresentShell(LorieConnection*, uint32_t output, uint32_t window, uint32_t serial, LorieShellRect viewport);
 void lorieOutputResize(LorieConnection*, uint32_t output, uint32_t window, int width, int height);

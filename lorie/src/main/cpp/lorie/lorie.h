@@ -19,6 +19,7 @@
 #include "shared_lock.h"
 #include "output_command.h"
 #include "cursor_image.h"
+#include "family_geometry.h"
 
 
 #ifdef __cplusplus
@@ -84,6 +85,7 @@ typedef enum {
     EVENT_INSPECTION_DONE,
     EVENT_DATA,
     EVENT_OUTPUT_CURSOR,
+    EVENT_OUTPUT_FAMILY,
 } eventType;
 
 typedef union {
@@ -190,6 +192,7 @@ LorieBuffer* lorieExportPixmap(struct _Pixmap* pixmap);
 void lorieSendOutputFrame(const lorieEvent* event);
 void lorieSendWindowInfo(const lorieEvent* event, const uint32_t* icon);
 void lorieSendShellInfo(const lorieEvent* event, const LorieShellInfo* info);
+void lorieSendFamilyGeometry(uint32_t output, const LorieFamilyGeometry* info);
 void lorieShellConfigure(uint32_t owner, int width, int height);
 void lorieShellRefresh(void);
 void lorieShellReset(void);

@@ -15,6 +15,9 @@ void lorieOutputBind(LorieConnection* c, uint32_t output, uint32_t window) {
 void lorieOutputBindShell(LorieConnection* c, uint32_t output, uint32_t window) {
     send(c, LORIE_OUTPUT_BIND, output, window, 0, 0, 1);
 }
+void lorieOutputBindDependents(LorieConnection* c, uint32_t output, uint32_t window, uint32_t parent) {
+    send(c, LORIE_OUTPUT_BIND, output, window, (int32_t)parent, 0, 2);
+}
 void lorieConfigureShell(LorieConnection* c, uint32_t owner, int width, int height) {
     send(c, LORIE_OUTPUT_SHELL, owner, 0, width, height);
 }

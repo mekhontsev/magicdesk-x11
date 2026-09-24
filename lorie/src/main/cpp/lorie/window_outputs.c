@@ -33,6 +33,9 @@ typedef struct OutputSelection {
     XID window;
     Bool changed, seen, dead, resizePending, geometryPending, ownsSize;
     Bool shell;
+    uint32_t parent;
+    LorieFamilyGeometry family;
+    Bool familyPublished;
     LorieShellRect viewport;
     uint32_t presentation;
     int width, height;
@@ -45,6 +48,13 @@ typedef struct OutputSelection {
 
 static OutputSelection* selections;
 static WindowImage* images;
+
+static Bool borrowed(OutputSelection* output) { return output->shell || output->parent; }
+static Bool separated(OutputSelection* output) {
+    for (OutputSelection* child = selections; child; child = child->next)
+        if (!child->dead && child->parent == output->id) return TRUE;
+    return FALSE;
+}
 
 static void outputKey(OutputSelection* output, int key, Bool down) {
     uint8_t mask = 1u << (key % 8);
@@ -92,10 +102,10 @@ Bool lorieOutputPoint(uint32_t id, uint32_t xid, int x, int y, WindowPtr* select
         WindowPtr window = pScreenPtr->root;
         if (xid && dixLookupWindow(&window, xid, serverClient, DixReadAccess) != Success) return FALSE;
         *selected = window;
-        *rootX = lorieOutputAxis(x, window->drawable.x + (output->shell ? output->viewport.left : 0),
-                output->shell ? output->viewport.right - output->viewport.left : output->contentWidth);
-        *rootY = lorieOutputAxis(y, window->drawable.y + (output->shell ? output->viewport.top : 0),
-                output->shell ? output->viewport.bottom - output->viewport.top : output->contentHeight);
+        *rootX = lorieOutputAxis(x, window->drawable.x + (borrowed(output) ? output->viewport.left : 0),
+                borrowed(output) ? output->viewport.right - output->viewport.left : output->contentWidth);
+        *rootY = lorieOutputAxis(y, window->drawable.y + (borrowed(output) ? output->viewport.top : 0),
+                borrowed(output) ? output->viewport.bottom - output->viewport.top : output->contentHeight);
         return TRUE;
     }
     return FALSE;
@@ -129,10 +139,14 @@ static void damageDestroyed(__unused DamagePtr damage, void* closure) {
 }
 
 static void releaseSelection(OutputSelection* output) {
+    for (OutputSelection* other = selections; other; other = other->next) {
+        if (other->id == output->parent) other->changed = other->geometryPending = TRUE;
+        if (other->parent == output->id) other->dead = other->changed = TRUE;
+    }
     releaseInput(output);
     lorieCursorRelease(output->id);
     if (output->ownsSize) for (OutputSelection* other = selections; other; other = other->next) {
-        if (other != output && !other->dead && other->window == output->window && other->width > 0) {
+        if (other != output && !other->dead && !borrowed(other) && other->window == output->window && other->width > 0) {
             other->ownsSize = TRUE;
             other->geometryPending = TRUE;
             break;
@@ -203,12 +217,20 @@ void lorieOutputCommand(const lorieEvent* event) {
     }
     if (event->output.operation == LORIE_OUTPUT_BIND) {
         if (output) { *link = output->next; releaseSelection(output); }
-        if (event->output.detail && !lorieShellWindow(event->output.window)) return;
+        if (event->output.detail > 2 || (event->output.detail == 1 && !lorieShellWindow(event->output.window))) return;
+        if (event->output.detail == 2) {
+            OutputSelection* parent = selections;
+            while (parent && parent->id != (uint32_t)event->output.x) parent = parent->next;
+            if (!parent || parent->dead || borrowed(parent) || separated(parent) ||
+                    !parent->window || parent->window != event->output.window) return;
+            parent->changed = parent->geometryPending = TRUE;
+        }
         output = calloc(1, sizeof(*output));
         if (!output) return;
         output->id = event->output.output;
         output->window = event->output.window;
-        output->shell = event->output.detail != 0;
+        output->shell = event->output.detail == 1;
+        output->parent = event->output.detail == 2 ? (uint32_t)event->output.x : 0;
         output->changed = TRUE;
         output->geometryPending = TRUE;
         output->next = *link;
@@ -219,13 +241,13 @@ void lorieOutputCommand(const lorieEvent* event) {
     if (output->shell && !lorieShellWindow(output->window)) { releaseInput(output); output->dead = TRUE; output->changed = TRUE; return; }
     if (event->output.operation == LORIE_OUTPUT_VIEWPORT) {
         LorieShellRect v = event->output.viewport;
-        if (!output->shell || !event->output.serial || v.left >= v.right || v.top >= v.bottom ||
+        if (!borrowed(output) || !event->output.serial || v.left >= v.right || v.top >= v.bottom ||
                 v.left < -16384 || v.top < -16384 || v.right > 16384 || v.bottom > 16384) return;
         output->viewport = v; output->presentation = event->output.serial; output->changed = TRUE;
         return;
     }
     if (event->output.operation == LORIE_OUTPUT_RESIZE) {
-        if (output->shell) return;
+        if (borrowed(output)) return;
         if (event->output.x < 1 || event->output.y < 1 ||
                 event->output.x > LORIE_WINDOW_SIZE_LIMIT || event->output.y > LORIE_WINDOW_SIZE_LIMIT) return;
         output->width = event->output.x;
@@ -285,15 +307,16 @@ typedef struct {
     WindowPtr owner;
     int right, bottom;
     unsigned count;
+    Bool external;
 } FamilyPlacement;
 
 static void placeTransient(WindowPtr window, void* closure) {
     FamilyPlacement* placement = closure;
     if (placement->count++ >= MAX_FAMILY_LAYERS || window == placement->owner) return;
     WindowPtr owner = placement->owner;
-    int x = loriePlaceTransientAxis(window->drawable.x, window->drawable.width,
+    int x = placement->external ? max(0, window->drawable.x) : loriePlaceTransientAxis(window->drawable.x, window->drawable.width,
             owner->drawable.x, owner->drawable.width);
-    int y = loriePlaceTransientAxis(window->drawable.y, window->drawable.height,
+    int y = placement->external ? max(0, window->drawable.y) : loriePlaceTransientAxis(window->drawable.y, window->drawable.height,
             owner->drawable.y, owner->drawable.height);
     moveContent(window, x, y);
     placement->right = max(placement->right, x + window->drawable.width);
@@ -303,7 +326,7 @@ static void placeTransient(WindowPtr window, void* closure) {
 void loriePrepareOutputs(void) {
     if (!pScreenPtr || !pScreenPtr->root) return;
     for (OutputSelection* output = selections; output; output = output->next) {
-        if ((!output->resizePending && !output->geometryPending) || output->dead || output->shell) continue;
+        if ((!output->resizePending && !output->geometryPending) || output->dead || borrowed(output)) continue;
         Bool resize = output->resizePending;
         output->resizePending = output->geometryPending = FALSE;
         WindowPtr window = pScreenPtr->root;
@@ -325,7 +348,8 @@ void loriePrepareOutputs(void) {
                 XID size[] = {(XID)width, (XID)height};
                 ConfigureWindow(window, CWWidth | CWHeight, size, serverClient);
             }
-            FamilyPlacement placement = {.owner = window, .right = x + width, .bottom = y + height};
+            FamilyPlacement placement = {.owner = window, .right = x + width, .bottom = y + height,
+                    .external = separated(output)};
             lorieWindowFamily(window, placeTransient, &placement);
             int screenWidth = max(pScreenPtr->width, placement.right);
             int screenHeight = max(pScreenPtr->height, placement.bottom);
@@ -366,6 +390,7 @@ static WindowImage* imageFor(WindowPtr window) {
 
 typedef struct {
     WindowPtr owner;
+    Bool childrenOnly;
     unsigned count;
     Bool changed;
     WindowImage* images[MAX_FAMILY_LAYERS];
@@ -374,6 +399,7 @@ typedef struct {
 
 static void appendLayer(WindowPtr window, void* closure) {
     FamilyFrame* frame = closure;
+    if (frame->childrenOnly && window == frame->owner) return;
     if (frame->count == MAX_FAMILY_LAYERS) return;
     WindowImage* image = imageFor(window);
     if (!image || !image->pixmap) return;
@@ -399,10 +425,22 @@ void loriePublishOutputs(struct lorie_shared_server_state* state) {
             output->seen = TRUE;
             frame.owner = window;
             if (window->realized) {
-                if (output->window) lorieWindowFamily(window, appendLayer, &frame);
+                if (output->parent) { frame.childrenOnly = TRUE; lorieWindowFamily(window, appendLayer, &frame); }
+                else if (separated(output)) appendLayer(window, &frame);
+                else if (output->window) lorieWindowFamily(window, appendLayer, &frame);
                 else appendLayer(window, &frame);
             }
         } else if (output->seen) output->dead = TRUE;
+        if (output->parent && (output->geometryPending || !output->familyPublished || output->dead)) {
+            LorieFamilyGeometry geometry = {0};
+            if (!output->dead) lorieWindowFamilyGeometry(window, TRUE, &geometry);
+            if (!output->familyPublished || memcmp(&geometry, &output->family, sizeof(geometry))) {
+                output->family = geometry;
+                output->familyPublished = TRUE;
+                lorieSendFamilyGeometry(output->id, &geometry);
+            }
+            output->geometryPending = FALSE;
+        }
         for (unsigned i = 0; i < frame.count; i++) frame.layers[i].layer.output = output->id;
         if (!output->changed && !frame.changed && output->layerCount == frame.count
                 && !memcmp(output->layers, frame.layers, frame.count * sizeof(lorieEvent))) continue;

@@ -62,24 +62,6 @@ void lorieShellConfigure(uint32_t id, int width, int height) {
     lorieConfigureNotify(width, height, 60, 0, NULL);
     state(id, TRUE);
 }
-typedef struct { WindowPtr owner; LorieShellInfo* info; RegionRec input; unsigned count; } Family;
-static void family(WindowPtr window, void* data) {
-    Family* f = data;
-    if (++f->count > LORIE_MAX_FAMILY_LAYERS) { f->info->inputComplete = FALSE; return; }
-    int x = window->drawable.x - f->owner->drawable.x, y = window->drawable.y - f->owner->drawable.y;
-    f->info->paint.left = min(f->info->paint.left, x);
-    f->info->paint.top = min(f->info->paint.top, y);
-    f->info->paint.right = max(f->info->paint.right, x + window->drawable.width);
-    f->info->paint.bottom = max(f->info->paint.bottom, y + window->drawable.height);
-    RegionRec region;
-    RegionNull(&region);
-    RegionCopy(&region, &window->winSize);
-    RegionTranslate(&region, -window->drawable.x, -window->drawable.y);
-    if (wInputShape(window)) RegionIntersect(&region, &region, wInputShape(window));
-    RegionTranslate(&region, x, y);
-    RegionUnion(&f->input, &f->input, &region);
-    RegionUninit(&region);
-}
 static void publish(WindowPtr window) {
     unsigned kind = role(window);
     if (!kind) return;
@@ -111,17 +93,12 @@ static void publish(WindowPtr window) {
         }
     }
     if (window->realized) {
-        Family f = {.owner = window, .info = &info};
-        RegionNull(&f.input);
-        lorieWindowFamily(window, family, &f);
-        if (RegionNumRects(&f.input) > LORIE_SHELL_INPUT_LIMIT) info.inputComplete = FALSE;
-        if (info.inputComplete) {
-            info.inputCount = RegionNumRects(&f.input);
-            BoxPtr rects = RegionRects(&f.input);
-            for (unsigned i = 0; i < info.inputCount; i++)
-                info.input[i] = (LorieShellRect){rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2};
-        }
-        RegionUninit(&f.input);
+        LorieFamilyGeometry geometry;
+        lorieWindowFamilyGeometry(window, FALSE, &geometry);
+        info.paint = geometry.paint;
+        info.inputComplete = geometry.inputComplete;
+        info.inputCount = geometry.inputCount;
+        memcpy(info.input, geometry.input, sizeof(info.input));
     }
     if (fresh || memcmp(&record->info, &info, sizeof(info))) {
         record->info = info;

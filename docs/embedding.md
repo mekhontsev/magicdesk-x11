@@ -36,6 +36,16 @@ acknowledges replacement before the host can release its surface. Releasing an
 output does not close an X client. Destroying a connection does not stop Xorg.
 The host decides when to close clients and retained sessions.
 
+`lorieOutputBindDependents` borrows an individual output's mapped transient family
+without its main layer. Its parent remains the only client-size owner. Until the
+borrow is released, the parent renders only the main window; the borrowed output
+uses an explicit family-local viewport for both pixels and input. It cannot be
+borrowed recursively or from a shell/whole-desktop output. Parent release revokes
+its dependent selection, and dependent release restores parent composition.
+`LorieFamilyGeometry` publishes bounded paint/input rectangles on geometry changes,
+not on animation frames. Toolkit grabs, ancestry, modal focus and client closure
+remain in the native window/input policies, independent of the host's presentation.
+
 An API-34 native ImageReader keeps EGL current while outputs are absent. Renderer
 threads never attach to a JVM. All outputs, including whole-screen output, use
 the same presentation path. EGL contexts are per connection; destroying one

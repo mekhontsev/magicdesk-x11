@@ -24,6 +24,9 @@ struct LorieConnection {
     LorieShellInfo shellInfo{};
     size_t shellBytes = 0;
     bool shellPending = false;
+    LorieFamilyGeometry familyInfo{};
+    size_t familyBytes = 0;
+    bool familyPending = false;
     LorieCommandQueue commands;
     LorieCallbacks callbacks;
     void* context;
@@ -54,6 +57,7 @@ struct LorieConnection {
         windowPending = false; windowIconBytes = 0;
         cursorPending = false; cursorBytes = 0;
         shellPending = false; shellBytes = 0;
+        familyPending = false; familyBytes = 0;
         if (notify) callbacks.disconnected(context);
     }
 
@@ -133,6 +137,18 @@ struct LorieConnection {
         return 1;
     }
 
+    int receiveFamily() {
+        ssize_t count = recv(fd, (char*)&familyInfo + familyBytes, sizeof(familyInfo) - familyBytes, MSG_DONTWAIT);
+        if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
+        if (count <= 0) { disconnect(true); return 0; }
+        familyBytes += count;
+        if (familyBytes != sizeof(familyInfo)) return 1;
+        if (familyInfo.inputCount > LORIE_SHELL_INPUT_LIMIT) { disconnect(true); return 0; }
+        if (callbacks.family) callbacks.family(context, header.shell.owner, &familyInfo);
+        familyBytes = 0; familyPending = false;
+        return 1;
+    }
+
     int receive(int events) {
         if (events & (ALOOPER_EVENT_ERROR | ALOOPER_EVENT_HANGUP)) { disconnect(true); return 0; }
         if (events & ALOOPER_EVENT_OUTPUT) {
@@ -142,6 +158,7 @@ struct LorieConnection {
         if (windowPending) return receiveWindow();
         if (cursorPending) return receiveCursor();
         if (shellPending) return receiveShell();
+        if (familyPending) return receiveFamily();
         ssize_t count = recv(fd, (char*)&header + headerBytes, sizeof(header) - headerBytes, MSG_DONTWAIT);
         if (count < 0 && (errno == EINTR || errno == EAGAIN)) return 1;
         if (count <= 0) { disconnect(true); return 0; }
@@ -149,6 +166,7 @@ struct LorieConnection {
         if (headerBytes != sizeof(header)) return 1;
         headerBytes = 0;
         switch (header.type) {
+            case EVENT_OUTPUT_FAMILY: familyPending = true; return receiveFamily();
             case EVENT_OUTPUT_SHELL: shellPending = true; return receiveShell();
             case EVENT_SHELL_STATE:
                 if (callbacks.shellState) callbacks.shellState(context, header.shell.owner, header.shell.available);
