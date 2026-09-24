@@ -49,15 +49,16 @@ static void roundTrip(off_t offset) {
     LorieBuffer *source = LorieBuffer_wrapFileDescriptor(3, 8, 2,
         AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fd, offset), *received = NULL;
     assert(source && socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
-    source->locked = 1; source->lockedData = source->desc.data; source->id = 123;
+    source->locked = 1; source->lockedData = source->desc.data; source->graphicsImage = (void*)123;
     LorieBuffer_acquire(source);
     assert(LorieBuffer_sendHandleToUnixSocket(source, sockets[0]));
     LorieBuffer_recvHandleFromUnixSocket(sockets[1], &received);
     assert(received && *(uint32_t*)received->desc.data == value && received->offset == offset);
-    assert(received->refcount == 1 && !received->locked && !received->lockedData && !received->id);
+    assert(received->refcount == 1 && !received->locked && !received->lockedData &&
+        !received->graphicsImage && !received->releaseGraphicsImage);
     assert(received->desc.id == source->desc.id && !received->desc.buffer);
     assert(fcntl(received->fd, F_GETFD) & FD_CLOEXEC);
-    source->id = 0;
+    source->graphicsImage = NULL;
     LorieBuffer_release(received); LorieBuffer_release(source); LorieBuffer_release(source);
     close(fd); close(sockets[0]); close(sockets[1]);
 }

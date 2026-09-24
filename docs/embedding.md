@@ -46,16 +46,21 @@ its dependent selection, and dependent release restores parent composition.
 not on animation frames. Toolkit grabs, ancestry, modal focus and client closure
 remain in the native window/input policies, independent of the host's presentation.
 
-An API-34 native ImageReader keeps EGL current while outputs are absent. Renderer
-threads never attach to a JVM. All outputs, including whole-screen output, use
-the same presentation path. EGL contexts are per connection; destroying one
-does not terminate the process-wide EGLDisplay used by another.
+The host supplies the `LorieGraphics` implementation when creating a connection.
+The immutable function table owns graphics devices, imported images, passes and
+Android presentation. Its calls execute on the connection's renderer worker;
+the worker never attaches to a JVM. All outputs, including whole-screen output,
+use this contract. Images retain their backing storage through completed GPU
+reads. The host's `submit` acknowledges completion, not just queue submission.
+Buffer acquisition and presentation happen outside the shared pixel mutex.
+Each connection owns its device; teardown cannot release another's resources.
 
 ## Build And Fixtures
 
-See the root README for NDK/Windows builds. Termux uses Clang/CMake, the Android
-system EGL/GLES libraries and vulkan-headers. The optional Vulkan path loads the
-system driver dynamically and is never a startup requirement.
+See the root README for NDK/Windows builds. Termux uses Clang/CMake, Android
+native headers and vulkan-headers. The optional EXA Vulkan copy accelerator loads
+the system driver dynamically and is never a startup requirement. The host owns
+the graphics implementation and its build dependencies.
 
 `lorie-smoke` is a native-only test host: it starts a server, obtains/closes a
 renderer socket at readiness, and requests normal shutdown. Run it with explicit
@@ -113,7 +118,7 @@ and closes its completion FD on disconnect, replacement and shutdown.
 
 Buffer transport carries fixed-width metadata and an FD or AHardwareBuffer handle,
 not a runtime `LorieBuffer` struct. The receiver owns fresh reference counts, locks,
-list links and GL objects. FD imports validate format, dimensions, stride, extent
+list links and graphics images. FD imports validate format, dimensions, stride, extent
 and overflow; pixel-aligned offsets need not be page-aligned. Mapping ownership is
 separate from the pixel pointer, and the last row need not include trailing padding.
 An incomplete or invalid buffer message terminates the connection, not a partial
@@ -124,13 +129,13 @@ mutex; newly queued work and unsuccessful callbacks wait for the next pass.
 Zombie-client cleanup preserves the order of surviving work and is reentrant.
 
 The shared pixel mutex protects CPU/GPU access through GPU completion, not socket
-publication or `eglSwapBuffers`. Each caller supplies its own peer-liveness context;
+publication or Android buffer acquisition/presentation. Each caller supplies its own peer-liveness context;
 renderers must never consult the X server's process-global socket. Monotonic timed
 acquisition observes peer loss without imposing a GPU-operation deadline. A broken
 peer fails that session; a live or abandoned mutex is never reinitialized in place.
 EXA FinishAccess releases the acquisition recorded by PrepareAccess. The renderer
 snapshots output metadata under its local lock, then draws without holding it.
-Only the render thread replaces EGL surfaces or releases GL buffers, so snapshots
+Only the render thread replaces output surfaces or releases graphics images, so snapshots
 retain their resources until the next iteration. Disconnect shuts down the socket
 before waiting for shared-state/Surface detachment, allowing lock waits to cancel.
 

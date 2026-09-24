@@ -244,19 +244,9 @@ struct lorie_shared_server_state {
     /* We should avoid triggering renderer if there is no output surface */
     volatile uint8_t surfaceAvailable;
 
-    /*
-     * We do not want to block the X server for an extended period; ideally, we would avoid blocking it at all.
-     * However, if we don’t block the X server, it will overwrite root window memory fragment, causing tearing or frame distortion.
-     * On some devices, there is no way to make EGL/GLES2 render a frame without calling eglSwapBuffers;
-     * calls like glFinish, eglWaitGL, and eglWaitClient have no effect.
-     * The only way to force EGL to render a frame and flush the command queue is by invoking eglSwapBuffers.
-     * But eglSwapBuffers will not return until Android actually displays the frame.
-     * Since we want to proceed as quickly as possible, waiting for the frame to be shown is not acceptable.
-     *
-     * Therefore, we set eglSwapInterval(dpy, 1), so that eglSwapBuffers does not block until the frame is displayed.
-     * Even then, we do not want to waste GPU resources rendering more than one full-screen quad per vsync,
-     * because that would spend GPU time on a frame that will never be shown.
-     * To handle this, we use a waitForNextFrame flag, which we set after a successful render and clear from the AChoreographer’s frame callback.
+    /* The pixel mutex covers composition through GPU completion, never Android
+     * buffer acquisition/presentation. Choreographer clears waitForNextFrame
+     * at vsync, so damage cannot render frames faster than they can be shown.
      */
     volatile uint8_t waitForNextFrame;
 
@@ -270,9 +260,7 @@ struct lorie_shared_server_state {
 #endif
 
 #ifdef __cplusplus
-#include <EGL/egl.h>
-#include <GLES2/gl2.h>
-#include <media/NdkImageReader.h>
+#include "graphics.h"
 #include "list.h"
 
 struct Renderer {
@@ -280,7 +268,7 @@ struct Renderer {
         Output* next = nullptr;
         uint32_t id = 0;
         ANativeWindow *window = nullptr, *pending = nullptr;
-        EGLSurface surface = EGL_NO_SURFACE;
+        void* surface = nullptr;
         bool changed = false;
         bool released = false;
         lorieEvent frame{};
@@ -300,14 +288,20 @@ struct Renderer {
     void refreshOutputSurfaces();
     void invalidateOutputs();
     void drawOutputs();
-    EGLDisplay egl_display = EGL_NO_DISPLAY;
-    EGLContext ctx = EGL_NO_CONTEXT;
-    EGLSurface defaultSfc = EGL_NO_SURFACE, sfc = EGL_NO_SURFACE;
-    EGLConfig cfg = nullptr;
-    ANativeWindow *defaultWin = nullptr, *win = nullptr;
-    AImageReader* defaultReader = nullptr;
+    const LorieGraphics* graphics = nullptr;
+    void* graphicsDevice = nullptr;
+    struct Draw {
+        uint32_t id;
+        void* surface;
+        ANativeWindow* window;
+        lorieEvent frame;
+        unsigned layerCount;
+        lorieEvent layers[LORIE_MAX_FAMILY_LAYERS];
+    };
+    Draw* draws = nullptr;
+    size_t drawCapacity = 0;
     struct xorg_list addedBuffers{}, buffers{}, removedBuffers{};
-    volatile int filtering = GL_NEAREST;
+    bool filtering = false;
 
     pthread_t thread = 0;
     bool initialized = false;
@@ -325,45 +319,26 @@ struct Renderer {
     struct lorie_shared_server_state* state = nullptr;
     int peerFd = -1; // Borrowed from this connection until shared-state detachment is acknowledged.
     bool connectionFailed = false;
-    // FBO used to blit deferred Present "copy" entries (see lorieTryScheduleGpuCopy) into the root texture.
-    GLuint gpuCopyFbo = 0;
-
-    GLuint g_texture_program = 0, gv_pos = 0, gv_coords = 0;
-    GLuint g_texture_program_bgra = 0, gv_pos_bgra = 0, gv_coords_bgra = 0;
-
-    EGLint configAttribs[13] = {
-        EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
-        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
-        EGL_RED_SIZE, 8,
-        EGL_GREEN_SIZE, 8,
-        EGL_BLUE_SIZE, 8,
-        EGL_ALPHA_SIZE, 0,
-        EGL_NONE
-    };
+    bool copyWaitingForBuffer = false;
 
     int gpuDoneFd = -1;
-    bool debugEnabled = false;
-    uint64_t dstSizeLogCount = 0, srcSizeLogCount = 0;
 
     bool init();
     void destroy();
     void* initThread();
-    ANativeWindow* createDefaultWindow();
     void releaseGraphics();
     int getWakeupCondFd() const;
-    void testCapabilities(int* legacy_drawing, int* gpu_present_disabled);
     void setSharedState(struct lorie_shared_server_state* newState);
     bool lockSharedState();
     void addBuffer(LorieBuffer* buf);
     void removeBuffer(uint64_t id);
     void removeAllBuffers();
-    LorieBuffer* findBufferWithRetry(uint64_t id);
+    void attachBuffer(LorieBuffer* buffer);
+    LorieBuffer* findBuffer(uint64_t id);
     uint64_t applyPendingGpuCopiesLocked();
     void applyPendingGpuCopies();
     bool shouldWait();
     void threadLoop();
-    void bindTexture(GLuint id) const;
     void notifyGpuCopyDone() const;
-    void drawRegion(GLuint id, float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1, uint8_t flip);
 };
 #endif

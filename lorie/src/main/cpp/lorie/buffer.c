@@ -4,8 +4,6 @@
 #pragma ide diagnostic ignored "OCUnusedGlobalDeclarationInspection"
 #pragma ide diagnostic ignored "OCUnusedMacroInspection"
 #pragma ide diagnostic ignored "readability-redundant-declaration"
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
 #ifndef __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 #define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 #endif
@@ -21,18 +19,12 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <errno.h>
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <android/sharedmem.h>
 #include "list.h"
 #include "buffer.h"
 #include "buffer_layout.h"
 #include "socket_io.h"
 
-// libEGL exports this only since API 26, weak so the library still loads below that.
-__attribute__((weak)) EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer* buffer);
 
 struct LorieBuffer {
     int refcount;
@@ -47,8 +39,8 @@ struct LorieBuffer {
     off_t offset;
     void* mapping;
 
-    GLuint id;
-    EGLImage image;
+    void* graphicsImage;
+    void (*releaseGraphicsImage)(void*);
     struct xorg_list link;
 
     int32_t gpuCopyPending;
@@ -312,11 +304,7 @@ __LIBC_HIDDEN__ void __LorieBuffer_free(LorieBuffer* buffer) {
 
     xorg_list_del(&buffer->link);
 
-    if (eglGetCurrentContext())
-        glDeleteTextures(1, &buffer->id);
-
-    if (eglGetCurrentDisplay() && buffer->image)
-        eglDestroyImageKHR(eglGetCurrentDisplay(), buffer->image);
+    if (buffer->graphicsImage) buffer->releaseGraphicsImage(buffer->graphicsImage);
 
     switch (buffer->desc.type) {
         case LORIEBUFFER_REGULAR:
@@ -395,7 +383,7 @@ __LIBC_HIDDEN__ int LorieBuffer_unlock(LorieBuffer* buffer) {
     return ret;
 }
 
-/* Wire metadata never contains process-local pointers, references or GL state. */
+/* Wire metadata never contains process-local pointers, references or renderer state. */
 typedef struct {
     uint64_t id, offset;
     int32_t width, height, stride;
@@ -447,45 +435,11 @@ __LIBC_HIDDEN__ void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuf
     else LorieBuffer_release(buffer);
 }
 
-__LIBC_HIDDEN__ void LorieBuffer_attachToGL(LorieBuffer* buffer) {
-    const EGLint imageAttributes[] = { EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE };
-    if (!eglGetCurrentDisplay() || !buffer)
-        return;
-
-    if (buffer->image == NULL && buffer->desc.buffer && eglGetNativeClientBufferANDROID)
-        buffer->image = eglCreateImageKHR(eglGetCurrentDisplay(), EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, eglGetNativeClientBufferANDROID(buffer->desc.buffer), imageAttributes);
-
-    glGenTextures(1, &buffer->id);
-    glBindTexture(GL_TEXTURE_2D, buffer->id);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    if (buffer->image)
-        glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, buffer->image);
-    else if (buffer->desc.data && buffer->desc.width > 0 && buffer->desc.height > 0) {
-        int format = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA;
-        // The image will be updated in redraw call because of `drawRequested` flag, so we are not uploading pixels
-        glTexImage2D(GL_TEXTURE_2D, 0, format, buffer->desc.stride, buffer->desc.height, 0, format, GL_UNSIGNED_BYTE, NULL);
-    }
-}
-
-__LIBC_HIDDEN__ void LorieBuffer_bindTexture(LorieBuffer *buffer) {
-    if (!buffer)
-        return;
-
-    glBindTexture(GL_TEXTURE_2D, buffer->id);
-    if (buffer->desc.type == LORIEBUFFER_FD) {
-        int format = buffer->desc.format == AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM ? GL_BGRA_EXT : GL_RGBA;
-        int rows = buffer->desc.height - 1;
-        if (rows) glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, buffer->desc.stride, rows,
-                                 format, GL_UNSIGNED_BYTE, buffer->desc.data);
-        glTexSubImage2D(GL_TEXTURE_2D, 0, 0, rows, buffer->desc.width, 1, format, GL_UNSIGNED_BYTE,
-                       (char*)buffer->desc.data + (size_t)rows * buffer->desc.stride * 4);
-    }
-}
-
-__LIBC_HIDDEN__ unsigned int LorieBuffer_getGLTextureId(LorieBuffer *buffer) {
-    return buffer ? buffer->id : 0;
+void* LorieBuffer_graphicsImage(LorieBuffer* buffer) { return buffer ? buffer->graphicsImage : NULL; }
+void LorieBuffer_setGraphicsImage(LorieBuffer* buffer, void* image, void (*release)(void*)) {
+    if (buffer->graphicsImage) buffer->releaseGraphicsImage(buffer->graphicsImage);
+    buffer->graphicsImage = image;
+    buffer->releaseGraphicsImage = release;
 }
 
 __LIBC_HIDDEN__ bool LorieBuffer_isRgba(LorieBuffer *buffer) {

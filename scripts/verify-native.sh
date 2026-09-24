@@ -59,10 +59,10 @@ if [ "$(uname -o)" = Android ]; then
         -I"$src/xserver/composite" -I"$src/xserver/mi" -I"$src/xserver/damageext" -I"$src/xserver/xfixes" \
         "$root/examples/output-input-test.c" -Wl,--gc-sections -o "$work/output-input"
     timeout 15 "$work/output-input"
-    "$cc" -std=gnu11 -DANDROID -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ -DEGL_NO_PLATFORM_SPECIFIC_TYPES \
+    "$cc" -std=gnu11 -DANDROID -D__ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__ \
         -ffunction-sections -fdata-sections -Wno-nullability-completeness \
         -I"$work" -I"$src/xserver/include" -I"$src/pixman/pixman" \
         "$root/examples/buffer-transport-test.c" -Wl,--gc-sections,--no-as-needed \
-        -L/system/lib64 -landroid -lEGL -lGLESv2 -lpixman-1 -o "$work/buffer"
+        -L/system/lib64 -landroid -lpixman-1 -o "$work/buffer"
     env -u LD_PRELOAD LD_LIBRARY_PATH=/system/lib64:$PREFIX/lib timeout 15 "$work/buffer"
 fi

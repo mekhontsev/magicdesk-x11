@@ -31,7 +31,8 @@ struct LorieConnection {
     LorieCallbacks callbacks;
     void* context;
 
-    LorieConnection(const LorieCallbacks& cb, void* owner) : callbacks(cb), context(owner) {
+    LorieConnection(const LorieCallbacks& cb, void* owner, const LorieGraphics* graphics) : callbacks(cb), context(owner) {
+        renderer.graphics = graphics;
         renderer.presentationCallback = cb.presented;
         renderer.presentationContext = owner;
         renderer.init();
@@ -261,13 +262,16 @@ struct LorieConnection {
     }
 };
 
-LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* context) {
+LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* context, const LorieGraphics* graphics) {
     if (!callbacks || !callbacks->frame || !callbacks->disconnected || !callbacks->window ||
             !callbacks->windowsCommitted || !callbacks->data ||
-            !callbacks->inspectionNode || !callbacks->inspectionDone) return nullptr;
+            !callbacks->inspectionNode || !callbacks->inspectionDone || !graphics ||
+            !graphics->create || !graphics->destroy || !graphics->image || !graphics->releaseImage ||
+            !graphics->surface || !graphics->releaseSurface || !graphics->acquire || !graphics->begin ||
+            !graphics->draw || !graphics->submit || !graphics->cancel || !graphics->present) return nullptr;
     void* memory = malloc(sizeof(LorieConnection));
     if (!memory) return nullptr;
-    auto* connection = new (memory) LorieConnection(*callbacks, context);
+    auto* connection = new (memory) LorieConnection(*callbacks, context, graphics);
     if (connection->renderer.initialized) return connection;
     connection->renderer.destroy();
     connection->~LorieConnection();

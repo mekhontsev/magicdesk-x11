@@ -1,9 +1,3 @@
-#define EGL_EGLEXT_PROTOTYPES
-#define GL_GLEXT_PROTOTYPES
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -30,9 +24,9 @@ bool Renderer::setOutputSurface(uint32_t id, ANativeWindow* window, bool release
         output->released = release;
         output->changed = true;
         pthread_cond_signal(stateCond);
-        // The caller's Surface must not be released until the renderer acknowledges it.
+        // EVENT_WAIT: worker releases the previous Surface before the caller may destroy it.
         while (output->changed && !stopping) pthread_cond_wait(&stateChangeFinishCond, &stateLock);
-        success = !stopping && (!window || output->surface != EGL_NO_SURFACE);
+        success = !stopping && (!window || output->surface);
         if (release) {
             Output** link = &outputs;
             while (*link != output) link = &(*link)->next;
@@ -70,13 +64,13 @@ bool Renderer::outputSurfacesChanged() const {
 
 bool Renderer::hasOutputSurface() const {
     for (Output* output = outputs; output; output = output->next)
-        if (output->surface != EGL_NO_SURFACE) return true;
+        if (output->surface) return true;
     return false;
 }
 
 bool Renderer::outputsNeedDraw() const {
     for (Output* output = outputs; output; output = output->next)
-        if (output->surface != EGL_NO_SURFACE && output->drawnRevision != output->frame.frame.revision) return true;
+        if (output->surface && output->drawnRevision != output->frame.frame.revision) return true;
     return false;
 }
 
@@ -85,14 +79,13 @@ void Renderer::invalidateOutputs() {
 }
 
 void Renderer::refreshOutputSurfaces() {
-    eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx);
     for (Output* output = outputs; output; output = output->next) {
         if (!output->changed) continue;
-        if (output->surface != EGL_NO_SURFACE) eglDestroySurface(egl_display, output->surface);
+        if (output->surface) graphics->releaseSurface(output->surface);
         if (output->window) ANativeWindow_release(output->window);
         output->window = output->pending;
         output->pending = nullptr;
-        output->surface = output->window ? eglCreateWindowSurface(egl_display, cfg, output->window, nullptr) : EGL_NO_SURFACE;
+        output->surface = output->window ? graphics->surface(graphicsDevice, output->window) : nullptr;
         output->drawnRevision = 0;
         output->changed = false;
     }
@@ -100,105 +93,93 @@ void Renderer::refreshOutputSurfaces() {
 }
 
 void Renderer::drawOutputs() {
-    // All outputs of this session share the single upstream Present-queue consumer.
     applyPendingGpuCopies();
     pthread_mutex_lock(&stateLock);
-    if (connectionFailed || state->waitForNextFrame) { pthread_mutex_unlock(&stateLock); return; }
-    struct Draw {
-        Draw* next;
-        uint32_t id;
-        EGLSurface surface;
-        ANativeWindow* window;
-        lorieEvent frame;
-        unsigned layerCount;
-        lorieEvent layers[];
-    };
-    Draw *draws = nullptr, **tail = &draws;
+    if (connectionFailed || copyWaitingForBuffer || state->waitForNextFrame) {
+        pthread_mutex_unlock(&stateLock);
+        return;
+    }
+    size_t count = 0;
+    for (Output* output = outputs; output; output = output->next) if (output->surface) ++count;
+    if (count > drawCapacity) {
+        auto* memory = (Draw*)realloc(draws, count * sizeof(Draw));
+        if (!memory) { pthread_mutex_unlock(&stateLock); return; }
+        draws = memory;
+        drawCapacity = count;
+    }
+    count = 0;
     for (Output* output = outputs; output; output = output->next) {
-        if (output->surface == EGL_NO_SURFACE || output->drawnRevision == output->frame.frame.revision) continue;
-        auto* draw = (Draw*)malloc(sizeof(Draw) + output->layerCount * sizeof(lorieEvent));
-        if (!draw) continue;
-        draw->next = nullptr; draw->id = output->id;
-        draw->surface = output->surface; draw->window = output->window;
-        draw->frame = output->frame; draw->layerCount = output->layerCount;
-        memcpy(draw->layers, output->layers, output->layerCount * sizeof(lorieEvent));
-        *tail = draw; tail = &draw->next;
+        if (!output->surface || output->drawnRevision == output->frame.frame.revision) continue;
+        Draw& draw = draws[count++];
+        draw.id = output->id; draw.surface = output->surface; draw.window = output->window;
+        draw.frame = output->frame; draw.layerCount = output->layerCount;
+        memcpy(draw.layers, output->layers, draw.layerCount * sizeof(lorieEvent));
     }
     pthread_mutex_unlock(&stateLock);
-    // Only this renderer thread replaces EGL surfaces/windows and releases GL
-    // buffers, on the next loop iteration. The snapshot borrows those resources,
-    // not Output records (which the connection may release after acknowledgement).
+    // Only this worker replaces surfaces and releases images. Reused snapshots
+    // borrow those resources, never the connection-owned Output records.
     bool rendered = false;
-    for (const Draw* item = draws; item; item = item->next) {
-        const Draw& draw = *item;
+    for (size_t index = 0; index < count; ++index) {
+        const Draw& draw = draws[index];
         const auto& frame = draw.frame.frame;
-        if (!lockSharedState()) break;
-        if (!eglMakeCurrent(egl_display, draw.surface, draw.surface, ctx)) {
-            pthread_mutex_unlock(&state->lock);
-            continue;
-        }
-        eglSwapInterval(egl_display, 0);
-        glDisable(GL_SCISSOR_TEST);
         int width = ANativeWindow_getWidth(draw.window), height = ANativeWindow_getHeight(draw.window);
-        glViewport(0, 0, width, height);
-        glClearColor(0, 0, 0, frame.presentation ? 0 : 1);
-        glClear(GL_COLOR_BUFFER_BIT);
+        // Android buffer acquisition/presentation must not hold the shared X pixel lock.
+        void* target = graphics->acquire(draw.surface, width, height);
+        if (!target) {
+            connectionFailed = true;
+            if (peerFd >= 0) shutdown(peerFd, SHUT_RDWR);
+            break;
+        }
+        if (!lockSharedState()) break;
+        float clear[4] = {0, 0, 0, frame.presentation ? 0.f : 1.f};
+        void* pass = graphics->begin(graphicsDevice, target, clear, false);
+        bool ok = pass != nullptr;
         bool complete = frame.width && frame.height && draw.layerCount;
-        if (frame.width && frame.height) {
-            int contentWidth = frame.presentation ? frame.viewport.right - frame.viewport.left : frame.width;
-            int contentHeight = frame.presentation ? frame.viewport.bottom - frame.viewport.top : frame.height;
+        int contentWidth = frame.presentation ? frame.viewport.right - frame.viewport.left : frame.width;
+        int contentHeight = frame.presentation ? frame.viewport.bottom - frame.viewport.top : frame.height;
+        if (ok && contentWidth > 0 && contentHeight > 0) {
             int originX = frame.presentation ? frame.viewport.left : 0;
             int originY = frame.presentation ? frame.viewport.top : 0;
-            float x = 1.f, y = 1.f;
-            if ((int64_t)width * contentHeight > (int64_t)height * contentWidth)
-                x = (float)height * contentWidth / (width * (float)contentHeight);
-            else y = (float)width * contentHeight / (height * (float)contentWidth);
-            glEnable(GL_SCISSOR_TEST);
-            glScissor((int)((1.f - x) * width / 2), (int)((1.f - y) * height / 2),
-                    (int)(x * width), (int)(y * height));
-            for (unsigned i = 0; i < draw.layerCount; i++) {
+            float scale = (float)width / contentWidth;
+            if ((float)height / contentHeight < scale) scale = (float)height / contentHeight;
+            float left = (width - scale * contentWidth) / 2, top = (height - scale * contentHeight) / 2;
+            for (unsigned i = 0; ok && i < draw.layerCount; ++i) {
                 const auto& layer = draw.layers[i].layer;
-                pthread_spin_lock(&bufferLock);
-                LorieBuffer* buffer = LorieBufferList_findById(&buffers, layer.bufferId);
-                pthread_spin_unlock(&bufferLock);
+                LorieBuffer* buffer = findBuffer(layer.bufferId);
                 if (!buffer) { complete = false; continue; }
-                const auto* desc = LorieBuffer_description(buffer);
-                LorieBuffer_bindTexture(buffer);
-                float right = desc->type == LORIEBUFFER_FD ? (float)desc->width / desc->stride : 1.f;
-                if (layer.alpha) { glEnable(GL_BLEND); glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); }
-                else glDisable(GL_BLEND);
-                drawRegion(0, -x + 2*x*(layer.x-originX)/contentWidth, -y + 2*y*(layer.y-originY)/contentHeight,
-                        -x + 2*x*(layer.x-originX + (float)layer.width)/contentWidth,
-                        -y + 2*y*(layer.y-originY + (float)layer.height)/contentHeight,
-                        0, 0, right, 1, LorieBuffer_isRgba(buffer));
+                const auto* description = LorieBuffer_description(buffer);
+                LorieGraphicsDraw command = {.image = LorieBuffer_graphicsImage(buffer),
+                    .sw = (float)description->width, .sh = (float)description->height,
+                    .x = left + (layer.x - originX) * scale, .y = top + (layer.y - originY) * scale,
+                    .width = layer.width * scale, .height = layer.height * scale,
+                    .clipX = (int)left, .clipY = (int)top,
+                    .clipWidth = (int)(scale * contentWidth), .clipHeight = (int)(scale * contentHeight),
+                    .blend = (bool)layer.alpha, .linear = filtering, .swapRedBlue = LorieBuffer_isRgba(buffer)};
+                ok = graphics->draw(pass, &command);
             }
-            glDisable(GL_BLEND);
-            glDisable(GL_SCISSOR_TEST);
         }
-        EGLSyncKHR fence = eglCreateSyncKHR(egl_display, EGL_SYNC_FENCE_KHR, nullptr);
-        glFlush();
-        if (fence != EGL_NO_SYNC_KHR) {
-            eglClientWaitSyncKHR(egl_display, fence, 0, EGL_FOREVER_KHR);
-            eglDestroySyncKHR(egl_display, fence);
-        } else glFinish();
+        if (ok) ok = graphics->submit(pass);
+        else if (pass) graphics->cancel(pass);
         pthread_mutex_unlock(&state->lock);
-        bool swapped = eglSwapBuffers(egl_display, draw.surface);
+        bool presented = ok && graphics->present(draw.surface);
         bool acknowledge = false;
         pthread_mutex_lock(&stateLock);
-        for (Output* output = outputs; output; output = output->next)
-            if (output->id == draw.id) {
-                output->drawnRevision = frame.revision;
-                acknowledge = frame.presentation && complete && output->presented != frame.presentation;
-                if (acknowledge) output->presented = frame.presentation;
-                break;
-            }
+        for (Output* output = outputs; output; output = output->next) if (output->id == draw.id) {
+            output->drawnRevision = frame.revision;
+            acknowledge = frame.presentation && complete && output->presented != frame.presentation;
+            if (acknowledge) output->presented = frame.presentation;
+            break;
+        }
         pthread_mutex_unlock(&stateLock);
         if (acknowledge && presentationCallback)
-            presentationCallback(presentationContext, draw.id, frame.presentation, swapped);
-        rendered = true;
-        state->renderedFrames++;
+            presentationCallback(presentationContext, draw.id, frame.presentation, presented);
+        if (!ok) {
+            connectionFailed = true;
+            if (peerFd >= 0) shutdown(peerFd, SHUT_RDWR);
+            break;
+        }
+        rendered |= presented;
+        if (presented) ++state->renderedFrames;
     }
-    eglMakeCurrent(egl_display, defaultSfc, defaultSfc, ctx);
-    while (draws) { Draw* next = draws->next; free(draws); draws = next; }
     if (rendered) state->waitForNextFrame = true;
 }

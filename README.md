@@ -14,7 +14,8 @@ belongs to MagicDesk's own x11-runtime module, not this fork.
 - Pointer, keyboard and Unicode input, geometry, titles and bounded icons.
 - Live X11 DPI, with optional XSettings ownership for application sessions.
 - Clipboard and copy drag-and-drop negotiation for text, HTML, PNG and files.
-- AHardwareBuffer/EGL and optional Vulkan DMA-BUF copies, with CPU fallback.
+- Host-provided graphics with AHardwareBuffer transport and optional EXA Vulkan
+  DMA-BUF copies, with CPU fallback.
 - Explicit connection replacement and native shutdown, without Java callbacks.
 
 The public C contract is [embedded.h](lorie/src/main/cpp/lorie/embedded.h).

@@ -173,29 +173,10 @@ bool LorieBuffer_sendHandleToUnixSocket(LorieBuffer* _Nonnull buffer, int socket
  */
 void LorieBuffer_recvHandleFromUnixSocket(int socketFd, LorieBuffer* _Nullable * _Nullable outBuffer);
 
-/**
- * Attach buffer to GL. Must be done on GL thread.
- * After attaching subsequent call to LorieBuffer_release must be done only from GL thread.
- *
- * @param buffer the buffer to be attached.
- */
-void LorieBuffer_attachToGL(LorieBuffer* _Nullable buffer);
-
-/**
- * Call glBindTexture for the buffer.
- *
- * @param buffer the buffer to be bound.
- */
-void LorieBuffer_bindTexture(LorieBuffer* _Nullable buffer);
-
-/**
- * Get the GL texture id the buffer is attached to (see LorieBuffer_attachToGL).
- * Returns 0 if the buffer was not attached to GL yet.
- *
- * @param buffer
- * @return
- */
-unsigned int LorieBuffer_getGLTextureId(LorieBuffer* _Nullable buffer);
+/* Images are owned/released on the renderer thread, before the backing storage. */
+void* _Nullable LorieBuffer_graphicsImage(LorieBuffer* _Nullable buffer);
+void LorieBuffer_setGraphicsImage(LorieBuffer* _Nonnull buffer, void* _Nullable image,
+    void (* _Nonnull release)(void* _Nullable));
 
 /**
  * Check if the buffer is RGBA.

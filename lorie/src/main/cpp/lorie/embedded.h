@@ -8,8 +8,8 @@
 #include "cursor_image.h"
 #include "shell_surface.h"
 #include "family_geometry.h"
+#include "graphics.h"
 
-typedef struct ANativeWindow ANativeWindow;
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,7 +63,7 @@ typedef struct {
     void (*shell)(void*, uint32_t owner, uint32_t window, const LorieShellInfo*);
     void (*shellState)(void*, uint32_t owner, bool available);
     void (*family)(void*, uint32_t output, const LorieFamilyGeometry*);
-    // Renderer-thread receipt, after the requested viewport has been submitted to EGL.
+    // Renderer-thread receipt, after the requested viewport has been submitted to Android.
     void (*presented)(void*, uint32_t output, uint32_t serial, bool success);
 } LorieCallbacks;
 
@@ -75,7 +75,7 @@ enum LorieDataCommand {
 enum LorieDataChannel { LORIE_DATA_CLIPBOARD, LORIE_DATA_DRAG };
 
 // Calls, including destroy, must be serialized on the creating Looper thread.
-LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* context);
+LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* context, const LorieGraphics* graphics);
 bool lorieConnectionConnect(LorieConnection* connection, int ownedDescriptor);
 // Borrows window during the call; retains its own reference until acknowledged release.
 bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativeWindow* window, bool release);
