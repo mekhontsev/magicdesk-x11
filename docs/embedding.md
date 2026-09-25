@@ -39,6 +39,9 @@ Snapshots also include current client dimensions, `WM_TRANSIENT_FOR` and
 validated minimum/maximum dimensions from `WM_NORMAL_HINTS`, in X pixel units.
 A zero maximum is unspecified. Android placement and decorations are not part
 of this contract.
+Catalog roles distinguish dialogs from application and provisional startup
+windows, including dialogs without `WM_TRANSIENT_FOR`. The host decides which
+roles may own a persistent launch or placement identity.
 
 Each output selects XID zero (the whole screen) or a Composite window family.
 Surface calls borrow ANativeWindow; the renderer retains its own reference and
@@ -388,6 +391,23 @@ F3 removes the hints and F4 restores them before handoff. Verify both changes
 without resizing Android, then Enter must still reach the unconstrained main
 window in the same host. `window-size-test.c` covers fixed, one-sided, absent,
 truncated, invalid and contradictory limits without Android or an X server.
+
+## Transient Placement
+
+In an individual-window output, the embedded WM initially centers an unpositioned
+`_NET_WM_WINDOW_TYPE_DIALOG` on its concrete `WM_TRANSIENT_FOR` parent. ICCCM
+`USPosition`/`PPosition`, override-redirect windows and other window types bypass
+centering. A window-private marker consumes this policy once per XID; later moves,
+resizes and remaps keep the client's geometry. The decision runs during the existing
+geometry reconciliation, before publishing the family, for both inline and borrowed
+dependent outputs. A guest window manager and whole-desktop output retain placement
+ownership. No render-frame allocation, timer or Java call is involved.
+
+Build `examples/dialog-placement.c` with `clang ... -lxcb` and run it against an
+existing individual-window output as `dialog-placement PARENT_XID`. It creates
+only its own transient fixtures and verifies centering, nested parents, explicit
+position hints, popup types, later moves and remaps. Configure/map events bound
+each wait; disconnect destroys the fixture windows without closing the parent.
 
 ## Window Icons
 

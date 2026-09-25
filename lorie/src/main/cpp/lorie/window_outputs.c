@@ -326,9 +326,14 @@ static void placeTransient(WindowPtr window, void* closure) {
     FamilyPlacement* placement = closure;
     if (placement->count++ >= MAX_FAMILY_LAYERS || window == placement->owner) return;
     WindowPtr owner = placement->owner;
-    int x = placement->external ? max(0, window->drawable.x) : loriePlaceTransientAxis(window->drawable.x, window->drawable.width,
+    WindowPtr parent = lorieWindowInitialDialogParent(window);
+    int x = parent ? lorieCenterTransientAxis(window->drawable.width, parent->drawable.x, parent->drawable.width)
+            : window->drawable.x;
+    int y = parent ? lorieCenterTransientAxis(window->drawable.height, parent->drawable.y, parent->drawable.height)
+            : window->drawable.y;
+    x = placement->external ? max(0, x) : loriePlaceTransientAxis(x, window->drawable.width,
             owner->drawable.x, owner->drawable.width);
-    int y = placement->external ? max(0, window->drawable.y) : loriePlaceTransientAxis(window->drawable.y, window->drawable.height,
+    y = placement->external ? max(0, y) : loriePlaceTransientAxis(y, window->drawable.height,
             owner->drawable.y, owner->drawable.height);
     moveContent(window, x, y);
     placement->right = max(placement->right, x + window->drawable.width);

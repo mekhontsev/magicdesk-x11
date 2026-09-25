@@ -19,3 +19,4 @@ void lorieWindowFocus(WindowPtr window);
 void lorieWindowBlur(WindowPtr window);
 void lorieWindowClose(XID window, Bool force);
 void lorieWindowConstrainSize(WindowPtr window, int* width, int* height);
+WindowPtr lorieWindowInitialDialogParent(WindowPtr window);

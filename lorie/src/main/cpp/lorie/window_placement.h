@@ -1,4 +1,15 @@
 #pragma once
+#include <stddef.h>
+#include <stdint.h>
+
+static inline int lorieWindowPositionSpecified(const uint32_t* hints, size_t count) {
+    /* ICCCM USPosition/PPosition; coordinates themselves are the live X geometry. */
+    return hints && count && (hints[0] & ((1u << 0) | (1u << 2)));
+}
+
+static inline int lorieCenterTransientAxis(int extent, int origin, int available) {
+    return origin + (extent < available ? (available - extent) / 2 : 0);
+}
 
 /* Keep a transient reachable without resizing toolkit-owned content. Oversized
  * content extends the output canvas; the existing aspect-fit renderer scales it. */

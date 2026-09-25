@@ -15,6 +15,7 @@
 #include "fullscreen_state.h"
 #include "window_role.h"
 #include "window_size.h"
+#include "window_placement.h"
 #include "window_family.h"
 #include "window_inspection_walk.h"
 
@@ -45,6 +46,7 @@ static int (*previousSendEvent)(ClientPtr);
 static XID managerWindow;
 static Atom managerSelection;
 static uint32_t stateSerial;
+static DevPrivateKeyRec initialPlacementKey;
 
 static uint32_t nextStateSerial(void) {
     if (++stateSerial == 0) ++stateSerial;
@@ -88,6 +90,22 @@ static WindowPtr lookup(XID id) {
 
 static WindowPtr transientFor(WindowPtr window) {
     return lookup(reference(window, "WM_TRANSIENT_FOR"));
+}
+
+WindowPtr lorieWindowInitialDialogParent(WindowPtr window) {
+    Bool* considered = dixLookupPrivate(&window->devPrivates, &initialPlacementKey);
+    if (*considered) return NULL;
+    *considered = TRUE;
+    if (!managerWindow || window->overrideRedirect || window->drawable.class != InputOutput
+            || window->parent != pScreenPtr->root
+            || !hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DIALOG")) return NULL;
+    WindowPtr parent = transientFor(window);
+    if (!parent || parent == window || parent == pScreenPtr->root || !parent->realized
+            || parent->drawable.class != InputOutput) return NULL;
+    PropertyPtr hints = property(window, "WM_NORMAL_HINTS");
+    if (hints && hints->type == XA_WM_SIZE_HINTS && hints->format == 32
+            && lorieWindowPositionSpecified(hints->data, hints->size)) return NULL;
+    return parent;
 }
 
 Bool lorieWindowBelongsTo(WindowPtr window, WindowPtr owner) {
@@ -223,6 +241,7 @@ static void publishWindow(WindowPtr window) {
     Bool hasIcon = lorieWindowIcon(value && value->type == XA_CARDINAL && value->format == 32
             ? value->data : NULL, value ? value->size : 0, icon);
     LorieWindowRole role = lorieWindowRole(hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_SPLASH"),
+            hasAtom(window, "_NET_WM_WINDOW_TYPE", "_NET_WM_WINDOW_TYPE_DIALOG"),
             property(window, "_NET_WM_WINDOW_TYPE") != NULL, property(window, "WM_CLASS") != NULL,
             property(window, "WM_STATE") != NULL);
     if (!record->published || record->changed || record->mapped != window->realized || strcmp(record->title, title)
@@ -608,6 +627,8 @@ static void onShape(WindowPtr window, int kind) {
 }
 
 void lorieWindowModelInit(ScreenPtr screen) {
+    if (!dixRegisterPrivateKey(&initialPlacementKey, PRIVATE_WINDOW, sizeof(Bool)))
+        FatalError("Cannot allocate X11 initial placement state\n");
     if (!AddCallback(&SelectionCallback, managerChanged, NULL)) FatalError("Cannot observe X11 WM ownership\n");
     previousSendEvent = ProcVector[X_SendEvent]; ProcVector[X_SendEvent] = sendEvent;
     realize = screen->RealizeWindow; screen->RealizeWindow = onRealize;
