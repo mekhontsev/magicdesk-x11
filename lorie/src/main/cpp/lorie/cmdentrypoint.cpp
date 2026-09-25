@@ -69,15 +69,15 @@ char *xtrans_unix_dir_x11 = nullptr;
 
 struct xorg_list registeredBuffers;
 
-static void (*serverReady)(void*, const char*);
+static LorieServerCallbacks serverCallbacks;
 static void* serverContext;
 static lorieEvent incoming;
 static size_t headerBytes;
 static bool started;
 
 bool lorieServerStart(int count, const char* const* arguments,
-        void (*ready)(void*, const char*), void* context) {
-    if (started || count < 0 || !ready) return false;
+        const LorieServerCallbacks* callbacks, void* context) {
+    if (started || count < 0 || !callbacks || !callbacks->ready || !callbacks->windowSize) return false;
     const char* tmp = getenv("TMPDIR");
     const char* xkb = getenv("XKB_CONFIG_ROOT");
     if (!tmp || tmp[0] != '/' || access(tmp, W_OK | X_OK) ||
@@ -98,7 +98,7 @@ bool lorieServerStart(int count, const char* const* arguments,
     asprintf(&xtrans_unix_path_x11, "%s/.X11-unix/X", tmp);
     asprintf(&xtrans_unix_dir_x11, "%s/.X11-unix/", tmp);
     XkbBaseDirectory = xkb;
-    serverReady = ready;
+    serverCallbacks = *callbacks;
     serverContext = context;
     xorg_list_init(&registeredBuffers);
     pthread_t thread;
@@ -522,7 +522,12 @@ int lorieServerConnect(void) {
     return client[0];
 }
 
-void lorieEmbeddedServerReady(void) { serverReady(serverContext, display); }
+void lorieEmbeddedServerReady(void) { serverCallbacks.ready(serverContext, display); }
+
+void lorieHostWindowSize(int minWidth, int minHeight, int maxWidth, int maxHeight,
+        int* width, int* height) {
+    serverCallbacks.windowSize(minWidth, minHeight, maxWidth, maxHeight, width, height);
+}
 
 void lorieServerStop(void) {
     if (!QueueWorkProc(+[](__unused ClientPtr, __unused void*) -> Bool {

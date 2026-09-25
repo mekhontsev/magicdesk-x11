@@ -12,8 +12,14 @@ static void ready(void* unused, const char* display) {
     lorieServerStop();
 }
 
+static void windowSize(int minWidth, int minHeight, int maxWidth, int maxHeight, int* width, int* height) {
+    *width = *width < minWidth ? minWidth : *width > maxWidth ? maxWidth : *width;
+    *height = *height < minHeight ? minHeight : *height > maxHeight ? maxHeight : *height;
+}
+
 int main(int argc, char** argv) {
     ALooper_prepare(ALOOPER_PREPARE_ALLOW_NON_CALLBACKS);
-    if (!lorieServerStart(argc - 1, (const char* const*)(argv + 1), ready, NULL)) return 1;
+    const LorieServerCallbacks callbacks = {.ready = ready, .windowSize = windowSize};
+    if (!lorieServerStart(argc - 1, (const char* const*)(argv + 1), &callbacks, NULL)) return 1;
     for (;;) ALooper_pollOnce(-1, NULL, NULL, NULL);
 }

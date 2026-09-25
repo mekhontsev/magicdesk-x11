@@ -9,10 +9,16 @@ Android floor is API 34; device coverage remains a separate obligation.
 
 One X server runs per isolated process. Call `lorieServerStart` on a prepared
 Android Looper with explicit arguments and accessible TMPDIR/XKB_CONFIG_ROOT.
-The engine copies arguments and starts its X thread. Its ready callback runs
+The engine copies arguments and `LorieServerCallbacks` and starts its X thread. Its ready callback runs
 on that thread at ddxReady, after sockets and input are initialized. Only then
 may the host connect or request normal shutdown. Server exit ends that isolated
 process. Host authorization and start/stop races must be resolved by the host.
+The synchronous `windowSize` callback receives a retained individual-output offer
+and validated positive minimum/maximum pixel limits. The host computes its layout
+policy without Java or X objects; the engine validates the result before applying
+it. It runs only during size/geometry reconciliation, not on animation frames.
+Root and borrowed outputs do not invoke it. The host must not block or re-enter
+the server from this callback.
 
 One opaque LorieConnection owns a renderer and the single Present consumer for
 its server. Create, connect, command, surface and destroy calls are serialized

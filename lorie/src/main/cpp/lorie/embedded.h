@@ -16,10 +16,18 @@
 extern "C" {
 #endif
 
-// One server per process. Start on a prepared Android Looper; ready runs on the
-// X server thread. Arguments are copied. Completion exits the isolated process.
+typedef struct {
+    void (*ready)(void* context, const char* display);
+    // Pure host layout policy, on the X server thread. Validated positive pixel
+    // limits; width/height initially contain the retained Surface offer.
+    void (*windowSize)(int minWidth, int minHeight, int maxWidth, int maxHeight,
+            int* width, int* height);
+} LorieServerCallbacks;
+
+// One server per process. Start on a prepared Android Looper; callbacks run on
+// the X server thread. Arguments/callbacks are copied. Completion exits the process.
 bool lorieServerStart(int count, const char* const* arguments,
-        void (*ready)(void* context, const char* display), void* context);
+        const LorieServerCallbacks* callbacks, void* context);
 void lorieServerStop(void);
 // Caller owns the returned socket. Replaces the previous renderer connection.
 int lorieServerConnect(void);

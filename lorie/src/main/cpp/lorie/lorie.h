@@ -184,6 +184,8 @@ void lorieDensityReset(void);
 void lorieSetDpi(int dpi);
 void lorieOutputCommand(const lorieEvent* event);
 void lorieEmbeddedServerReady(void);
+void lorieHostWindowSize(int minWidth, int minHeight, int maxWidth, int maxHeight,
+        int* width, int* height);
 void lorieOutputWindowDestroyed(XID id);
 void lorieOutputGeometryChanged(void);
 void loriePrepareOutputs(void);

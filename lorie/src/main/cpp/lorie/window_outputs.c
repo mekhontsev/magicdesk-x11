@@ -351,7 +351,13 @@ void loriePrepareOutputs(void) {
             // declared limits. Rendering and input aspect-fit the resulting canvas.
             int width = output->ownsSize ? output->width : window->drawable.width;
             int height = output->ownsSize ? output->height : window->drawable.height;
-            if (output->ownsSize) lorieWindowConstrainSize(window, &width, &height);
+            if (output->ownsSize) {
+                int minWidth = 1, minHeight = 1, maxWidth = INT32_MAX, maxHeight = INT32_MAX;
+                lorieWindowConstrainSize(window, &minWidth, &minHeight);
+                lorieWindowConstrainSize(window, &maxWidth, &maxHeight);
+                lorieHostWindowSize(minWidth, minHeight, maxWidth, maxHeight, &width, &height);
+                lorieWindowConstrainSize(window, &width, &height);
+            }
             int x = max(0, window->drawable.x), y = max(0, window->drawable.y);
             // Composite can expose off-screen pixels, but X input is clipped to the root.
             // Move the containing top-level (including any WM frame), not its child content.
