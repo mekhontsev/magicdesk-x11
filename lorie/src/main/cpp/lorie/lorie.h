@@ -184,6 +184,7 @@ typedef union {
 void lorieDensityInit(void);
 void lorieDensityReset(void);
 void lorieSetDpi(int dpi);
+void lorieSetColorScheme(int scheme);
 void lorieOutputCommand(const lorieEvent* event);
 void lorieEmbeddedServerReady(void);
 void lorieHostWindowSize(const LorieWindowConstraints*, int* width, int* height);

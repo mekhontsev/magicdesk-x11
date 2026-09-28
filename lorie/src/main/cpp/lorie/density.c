@@ -16,6 +16,7 @@ extern ScreenPtr pScreenPtr;
 static XID settingsWindow;
 static Atom settingsSelection;
 static uint32_t serial;
+static int colorScheme;
 static char resources[40];
 
 static Atom atom(const char* name) { return MakeAtom(name, strlen(name), TRUE); }
@@ -43,7 +44,7 @@ static void publish(void) {
     }
     if (settingsWindow && dixLookupWindow(&owner, settingsWindow, serverClient, DixWriteAccess) == Success) {
         uint8_t bytes[LORIE_DENSITY_SETTINGS_SIZE];
-        size_t length = lorieDensitySettings(bytes, monitorResolution, ++serial);
+        size_t length = lorieDensitySettings(bytes, monitorResolution, ++serial, colorScheme);
         Atom settings = atom("_XSETTINGS_SETTINGS");
         dixChangeWindowProperty(serverClient, owner, settings, settings, 8, PropModeReplace, length, bytes, TRUE);
     }
@@ -52,6 +53,8 @@ static void publish(void) {
 void lorieDensityInit(void) {
     settingsWindow = None;
     serial = 0;
+    const char* scheme = getenv("MAGICDESK_COLOR_SCHEME");
+    colorScheme = scheme && !strcmp(scheme, "1") ? 1 : scheme && !strcmp(scheme, "2") ? 2 : 0;
     resources[0] = 0;
     // Whole Linux desktops own their toolkit settings daemon. Dedicated app sessions use ours.
     const char* enabled = getenv("MAGICDESK_X11_XSETTINGS");
@@ -118,5 +121,11 @@ void lorieSetDpi(int dpi) {
     RROutputPtr output = RRFirstOutput(pScreenPtr);
     if (output) RROutputSetPhysicalSize(output, pScreenPtr->mmWidth, pScreenPtr->mmHeight);
     RRScreenSizeNotify(pScreenPtr);
+    publish();
+}
+
+void lorieSetColorScheme(int value) {
+    if (!pScreenPtr || !pScreenPtr->root || value < 0 || value > 2 || colorScheme == value) return;
+    colorScheme = value;
     publish();
 }

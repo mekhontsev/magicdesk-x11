@@ -212,6 +212,7 @@ void lorieOutputCommand(const lorieEvent* event) {
         return;
     }
     if (event->output.operation == LORIE_OUTPUT_DPI) { lorieSetDpi(event->output.x); return; }
+    if (event->output.operation == LORIE_OUTPUT_COLOR_SCHEME) { lorieSetColorScheme(event->output.x); return; }
     if (event->output.operation == LORIE_OUTPUT_CLOSE) {
         lorieWindowClose(event->output.window, event->output.down);
         return;

@@ -461,6 +461,13 @@ Toolkit-specific environment overrides remain application-owned.
 `examples/density-settings-test.c` checks the fixed, bounded XSettings wire
 format and the integer-widget/fractional-font conversion.
 
+`lorieSetScreenColorScheme` sends an appearance preference through the same command
+stream (0 unspecified, 1 dark, 2 light); `MAGICDESK_COLOR_SCHEME` supplies the
+initial value. Application sessions publish `Net/ThemeName` as `Adwaita` or
+`Adwaita-dark` in the same atomic XSettings property as density. Unspecified omits
+the theme entry. The server does not install themes or reclaim another settings
+manager's selection, and whole-desktop sessions retain their own appearance policy.
+
 `examples/density-window.c` is a GTK 3 client for live density and input checks.
 It reports toolkit scaling changes and retains its button state across resizes.
 Build in Termux with the GTK 3 development files available, then run the binary

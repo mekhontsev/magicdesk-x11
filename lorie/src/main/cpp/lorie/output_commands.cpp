@@ -93,6 +93,9 @@ void lorieCloseWindow(LorieConnection* c, uint32_t window, bool force) {
     send(c, LORIE_OUTPUT_CLOSE, 0, window, 0, 0, 0, force);
 }
 void lorieSetScreenDpi(LorieConnection* c, int dpi) { send(c, LORIE_OUTPUT_DPI, 0, 0, dpi); }
+void lorieSetScreenColorScheme(LorieConnection* c, int scheme) {
+    if (scheme >= 0 && scheme <= 2) send(c, LORIE_OUTPUT_COLOR_SCHEME, 0, 0, scheme);
+}
 void lorieConfirmWindowState(LorieConnection* c, uint32_t window, uint32_t requestSerial, LorieWindowState actual) {
     send(c, LORIE_OUTPUT_FULLSCREEN_CONFIRM, 0, window, (int32_t)requestSerial, 0, 0, actual.fullscreen);
 }

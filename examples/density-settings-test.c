@@ -9,7 +9,7 @@ static uint32_t card32(const uint8_t* bytes) {
 static void check(int dpi, int scale, int unscaled) {
     uint8_t bytes[LORIE_DENSITY_SETTINGS_SIZE + 1];
     bytes[LORIE_DENSITY_SETTINGS_SIZE] = 0x7f;
-    size_t length = lorieDensitySettings(bytes, dpi, 0x87654321);
+    size_t length = lorieDensitySettings(bytes, dpi, 0x87654321, 0);
     assert(length <= LORIE_DENSITY_SETTINGS_SIZE);
     assert(bytes[LORIE_DENSITY_SETTINGS_SIZE] == 0x7f);
     assert(bytes[0] == 0 && card32(bytes + 4) == 0x87654321 && card32(bytes + 8) == 3);
@@ -35,7 +35,22 @@ int main(void) {
     check(312, 3, 104 * 1024);
     check(1536, 16, 96 * 1024);
     uint8_t bytes[LORIE_DENSITY_SETTINGS_SIZE];
-    assert(!lorieDensitySettings(bytes, 0, 0));
-    assert(!lorieDensitySettings(bytes, 1537, 0));
+    assert(!lorieDensitySettings(bytes, 0, 0, 0));
+    assert(!lorieDensitySettings(bytes, 1537, 0, 0));
+    assert(!lorieDensitySettings(bytes, 96, 0, 3));
+    for (int scheme = 1; scheme <= 2; scheme++) {
+        uint8_t themed[LORIE_DENSITY_SETTINGS_SIZE + 1];
+        themed[LORIE_DENSITY_SETTINGS_SIZE] = 0x7f;
+        size_t offset = lorieDensitySettings(bytes, 96, 7, 0);
+        size_t length = lorieDensitySettings(themed, 96, 7, scheme);
+        assert(length <= LORIE_DENSITY_SETTINGS_SIZE && themed[LORIE_DENSITY_SETTINGS_SIZE] == 0x7f);
+        assert(card32(themed + 8) == 4 && themed[offset] == 1);
+        assert(themed[offset + 2] == 13 && !memcmp(themed + offset + 4, "Net/ThemeName", 13));
+        offset += 20;
+        assert(card32(themed + offset) == 7);
+        const char* theme = scheme == 1 ? "Adwaita-dark" : "Adwaita";
+        assert(card32(themed + offset + 4) == strlen(theme));
+        assert(!memcmp(themed + offset + 8, theme, strlen(theme)));
+    }
     puts("X11 density settings verified");
 }

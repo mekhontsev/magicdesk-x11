@@ -124,6 +124,8 @@ void lorieInspectWindow(LorieConnection*, uint32_t serial, uint32_t window, uint
 // Graceful WM_DELETE_WINDOW, or disconnect the owning client when force is true.
 void lorieCloseWindow(LorieConnection*, uint32_t window, bool force);
 void lorieSetScreenDpi(LorieConnection*, int dpi);
+// XSettings theme preference: 0 unspecified, 1 dark, 2 light. Does not replace a client settings manager.
+void lorieSetScreenColorScheme(LorieConnection*, int scheme);
 void lorieConfirmWindowState(LorieConnection*, uint32_t window, uint32_t requestSerial, LorieWindowState actual);
 void lorieConfirmMaximized(LorieConnection*, uint32_t window, uint32_t requestSerial, unsigned axes);
 void lorieConfirmInteraction(LorieConnection*, uint32_t window, uint32_t requestSerial, unsigned flags);
