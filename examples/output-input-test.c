@@ -16,6 +16,7 @@ static xEvent notification;
 static int notifications;
 static LorieDataEvent lastData;
 static int dataEvents;
+void lorieDirectInputRelease(uint32_t output) { (void)output; }
 
 pixman_bool_t pixman_region_contains_point(const pixman_region16_t* region, int x, int y, pixman_box16_t* box) {
     *box = region->extents;
@@ -95,6 +96,12 @@ int main(void) {
     source.id = 1; source.window = 100; source.next = &other;
     other.id = 2; other.window = 200;
     selections = &source;
+
+    lorieDataPointer(source.id, source.window, 1, TRUE);
+    lorieDataPointer(other.id, other.window, 1, FALSE);
+    assert(pointerDown && pointerOutput == source.id);
+    lorieDataPointer(source.id, source.window, 1, FALSE);
+    assert(!pointerDown);
 
     // Export completion must clear the lease as well as the physical button.
     for (int i = 1; i <= 3; i++) {

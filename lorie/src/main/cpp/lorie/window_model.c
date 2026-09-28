@@ -28,6 +28,7 @@ typedef struct WindowRecord {
     Bool seen, mapped, changed, published, destroyed;
     LorieFullscreenState fullscreen;
     LorieMaximizedState maximized;
+    LorieWindowInteraction interaction;
     char title[256];
     Bool hasIcon;
     LorieWindowRole role;
@@ -46,6 +47,8 @@ static int (*previousSendEvent)(ClientPtr);
 static XID managerWindow;
 static Atom managerSelection;
 static uint32_t stateSerial;
+static XID lastInputWindow;
+static uint32_t lastInputTime;
 static DevPrivateKeyRec initialPlacementKey;
 
 static uint32_t nextStateSerial(void) {
@@ -66,13 +69,12 @@ static XID reference(WindowPtr window, const char* name) {
             ? *(CARD32*)value->data : None;
 }
 
-void lorieWindowConstrainSize(WindowPtr window, int* width, int* height) {
+LorieWindowConstraints lorieWindowConstraints(WindowPtr window) {
     PropertyPtr hints = property(window, "WM_NORMAL_HINTS");
     Bool valid = hints && hints->type == XA_WM_SIZE_HINTS && hints->format == 32;
     const uint32_t* values = valid ? hints->data : NULL;
     size_t count = valid ? hints->size : 0;
-    *width = lorieWindowSizeAxis(*width, values, count, 0);
-    *height = lorieWindowSizeAxis(*height, values, count, 1);
+    return lorieWindowSizeHints(values, count);
 }
 
 static Bool hasAtom(WindowPtr window, const char* name, const char* item) {
@@ -86,6 +88,17 @@ static Bool hasAtom(WindowPtr window, const char* name, const char* item) {
 static WindowPtr lookup(XID id) {
     WindowPtr window = NULL;
     return id && dixLookupWindow(&window, id, serverClient, DixReadAccess) == Success ? window : NULL;
+}
+
+void lorieWindowUserInput(XID window) {
+    if (!managerWindow) return;
+    lastInputWindow = window; lastInputTime = GetTimeInMillis();
+}
+
+static Bool urgent(WindowPtr window) {
+    PropertyPtr hints = property(window, "WM_HINTS");
+    return hints && hints->type == XA_WM_HINTS && hints->format == 32 && hints->size
+            && (((CARD32*)hints->data)[0] & (1u << 8));
 }
 
 static WindowPtr transientFor(WindowPtr window) {
@@ -224,6 +237,15 @@ static WindowRecord* recordFor(WindowPtr window) {
                     | (hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_MAXIMIZED_VERT") ? LORIE_MAXIMIZED_VERTICAL : 0);
         }
         record->maximized.serial = nextStateSerial();
+        record->interaction.serial = nextStateSerial();
+        if (managerWindow) {
+            record->interaction.attention = urgent(window)
+                    || hasAtom(window, "_NET_WM_STATE", "_NET_WM_STATE_DEMANDS_ATTENTION");
+            PropertyPtr hints = property(window, "WM_HINTS");
+            if (hints && hints->type == XA_WM_HINTS && hints->format == 32 && hints->size >= 3
+                    && (((CARD32*)hints->data)[0] & 2) && ((CARD32*)hints->data)[2] == 3)
+                record->interaction.action = LORIE_INTERACTION_MINIMIZE;
+        }
     }
     return record;
 }
@@ -255,16 +277,12 @@ static void publishWindow(WindowPtr window) {
                 .window = record->id, .hasIcon = hasIcon, .role = role, .hostManaged = managerWindow != None,
                 .fullscreenSerial = record->fullscreen.serial,
                 .maximized = record->maximized,
+                .interaction = record->interaction,
                 .fullscreenRequested = record->fullscreen.requested,
                 .fullscreenActual = record->fullscreen.actual}};
-        int minWidth = 1, minHeight = 1, maxWidth = LORIE_WINDOW_SIZE_LIMIT, maxHeight = LORIE_WINDOW_SIZE_LIMIT;
-        lorieWindowConstrainSize(window, &minWidth, &minHeight);
-        lorieWindowConstrainSize(window, &maxWidth, &maxHeight);
         event.windowInfo.parent = reference(window, "WM_TRANSIENT_FOR");
         event.windowInfo.width = window->drawable.width; event.windowInfo.height = window->drawable.height;
-        event.windowInfo.minWidth = minWidth; event.windowInfo.minHeight = minHeight;
-        event.windowInfo.maxWidth = maxWidth == LORIE_WINDOW_SIZE_LIMIT ? 0 : maxWidth;
-        event.windowInfo.maxHeight = maxHeight == LORIE_WINDOW_SIZE_LIMIT ? 0 : maxHeight;
+        event.windowInfo.constraints = lorieWindowConstraints(window);
         memcpy(event.windowInfo.title, title, sizeof(title));
         value = property(window, "WM_CLASS");
         if (value && value->data && value->size && value->type == XA_STRING && value->format == 8) {
@@ -379,6 +397,42 @@ void lorieWindowMaximizedConfirm(XID id, uint32_t serial, unsigned axes) {
     free(atoms);
 }
 
+void lorieWindowInteractionConfirm(XID id, uint32_t serial, unsigned flags) {
+    if (!managerWindow || (flags & ~7u)) return;
+    WindowPtr window = lookup(id);
+    WindowRecord* record = window ? recordFor(window) : NULL;
+    if (!record || record->interaction.serial != serial) return;
+    PropertyPtr previous = property(window, "_NET_WM_STATE");
+    unsigned long count = previous && previous->type == XA_ATOM && previous->format == 32 ? previous->size : 0;
+    CARD32* atoms = calloc(count + 2, sizeof(CARD32));
+    if (!atoms) return;
+    Atom hidden = atom("_NET_WM_STATE_HIDDEN"), attention = atom("_NET_WM_STATE_DEMANDS_ATTENTION");
+    unsigned long length = 0;
+    for (unsigned long i = 0; i < count; i++) {
+        CARD32 value = ((CARD32*)previous->data)[i];
+        if (value != hidden && value != attention) atoms[length++] = value;
+    }
+    if (flags & LORIE_STATE_ACTIVE) flags &= ~LORIE_STATE_ATTENTION;
+    if (flags & LORIE_STATE_MINIMIZED) atoms[length++] = hidden;
+    if (flags & LORIE_STATE_ATTENTION) atoms[length++] = attention;
+    dixChangeWindowProperty(serverClient, window, atom("_NET_WM_STATE"), XA_ATOM, 32,
+            PropModeReplace, length, atoms, TRUE);
+    free(atoms);
+    CARD32 state[] = {flags & LORIE_STATE_MINIMIZED ? 3 : 1, None};
+    dixChangeWindowProperty(serverClient, window, atom("WM_STATE"), atom("WM_STATE"), 32,
+            PropModeReplace, 2, state, TRUE);
+    CARD32 active = reference(pScreenPtr->root, "_NET_ACTIVE_WINDOW");
+    if ((flags & LORIE_STATE_ACTIVE) || active == id) {
+        active = flags & LORIE_STATE_ACTIVE ? id : None;
+        dixChangeWindowProperty(serverClient, pScreenPtr->root, atom("_NET_ACTIVE_WINDOW"), XA_WINDOW, 32,
+                PropModeReplace, 1, &active, TRUE);
+    }
+    record->interaction.actual = flags;
+    record->interaction.action = LORIE_INTERACTION_NONE;
+    record->interaction.attention = !!(flags & LORIE_STATE_ATTENTION);
+    record->changed = dirty = TRUE;
+}
+
 static int sendEvent(ClientPtr client) {
     REQUEST(xSendEventReq);
     REQUEST_SIZE_MATCH(xSendEventReq);
@@ -387,6 +441,23 @@ static int sendEvent(ClientPtr client) {
             event->u.u.type == ClientMessage && event->u.u.detail == 32) {
         WindowPtr window = lookup(event->u.clientMessage.window);
         WindowRecord* record = window ? recordFor(window) : NULL;
+        Atom type = event->u.clientMessage.u.l.type;
+        if (type == atom("_NET_ACTIVE_WINDOW") || type == atom("WM_CHANGE_STATE")) {
+            if (record) {
+                if (type == atom("_NET_ACTIVE_WINDOW")) {
+                    WindowPtr input = lookup(lastInputWindow);
+                    Bool allowed = input && wClient(input) == wClient(window)
+                            && lorieActivationTimestamp(event->u.clientMessage.u.l.longs1, lastInputTime, GetTimeInMillis());
+                    record->interaction.action = allowed ? LORIE_INTERACTION_ACTIVATE : LORIE_INTERACTION_NONE;
+                    if (!allowed) record->interaction.attention = TRUE;
+                    lastInputTime = 0;
+                } else if (event->u.clientMessage.u.l.longs0 == 3) record->interaction.action = LORIE_INTERACTION_MINIMIZE;
+                else return Success;
+                record->interaction.serial = nextStateSerial();
+                record->changed = dirty = TRUE;
+            }
+            return Success;
+        }
         if (event->u.clientMessage.u.l.type == atom("_NET_WM_MOVERESIZE")) {
             unsigned direction = event->u.clientMessage.u.l.longs2;
             if (record && (direction == 11 || (direction <= 8 &&
@@ -406,6 +477,15 @@ static int sendEvent(ClientPtr client) {
         }
         Atom horizontal = atom("_NET_WM_STATE_MAXIMIZED_HORZ"), vertical = atom("_NET_WM_STATE_MAXIMIZED_VERT");
         CARD32 first = event->u.clientMessage.u.l.longs1, second = event->u.clientMessage.u.l.longs2;
+        if (record && (first == atom("_NET_WM_STATE_DEMANDS_ATTENTION") || second == atom("_NET_WM_STATE_DEMANDS_ATTENTION"))) {
+            unsigned action = event->u.clientMessage.u.l.longs0;
+            if (action <= 2) {
+                record->interaction.attention = action == 2 ? !record->interaction.attention : action == 1;
+                record->interaction.action = LORIE_INTERACTION_NONE;
+                record->interaction.serial = nextStateSerial();
+                record->changed = dirty = TRUE;
+            }
+        }
         unsigned axes = ((first == horizontal || second == horizontal) ? LORIE_MAXIMIZED_HORIZONTAL : 0)
                 | ((first == vertical || second == vertical) ? LORIE_MAXIMIZED_VERTICAL : 0);
         if (record && lorieMaximizedRequest(&record->maximized, event->u.clientMessage.u.l.longs0, axes)) {
@@ -477,7 +557,8 @@ void lorieWindowManagerReady(void) {
     dixChangeWindowProperty(serverClient, owner, atom("_NET_WM_NAME"), atom("UTF8_STRING"), 8,
             PropModeReplace, sizeof(name) - 1, name, TRUE);
     CARD32 supported[] = {check, atom("_NET_WM_STATE"), atom("_NET_WM_STATE_FULLSCREEN"),
-            atom("_NET_WM_STATE_MAXIMIZED_HORZ"), atom("_NET_WM_STATE_MAXIMIZED_VERT"), atom("_NET_WM_MOVERESIZE")};
+            atom("_NET_WM_STATE_MAXIMIZED_HORZ"), atom("_NET_WM_STATE_MAXIMIZED_VERT"), atom("_NET_WM_MOVERESIZE"),
+            atom("_NET_ACTIVE_WINDOW"), atom("_NET_WM_STATE_DEMANDS_ATTENTION"), atom("_NET_WM_STATE_HIDDEN")};
     dixChangeWindowProperty(serverClient, pScreenPtr->root, atom("_NET_SUPPORTED"), XA_ATOM, 32,
             PropModeReplace, ARRAY_SIZE(supported), supported, TRUE);
     xEvent event = {0};
@@ -564,7 +645,16 @@ void lorieWindowBlur(WindowPtr window) {
 
 static void propertyChanged(CallbackListPtr* list, void* closure, void* data) {
     const PropertyStateRec* change = data;
-    if (change->prop->propertyName == XA_WM_CLASS) {
+    if (managerWindow && change->prop->propertyName == XA_WM_HINTS) {
+        for (WindowRecord* record = records; record; record = record->next)
+            if (record->id == change->win->drawable.id) {
+                record->interaction.attention = urgent(change->win);
+                record->interaction.action = LORIE_INTERACTION_NONE;
+                record->interaction.serial = nextStateSerial();
+                record->changed = TRUE;
+            }
+    }
+    if (change->prop->propertyName == XA_WM_CLASS || change->prop->propertyName == XA_WM_NORMAL_HINTS) {
         for (WindowRecord* record = records; record; record = record->next)
             if (record->id == change->win->drawable.id) record->changed = TRUE;
     }
@@ -599,6 +689,8 @@ static Bool onDestroy(WindowPtr w) {
 }
 static Bool onPosition(WindowPtr w, int x, int y) {
     dirty = TRUE;
+    for (WindowRecord* record = records; record; record = record->next)
+        if (record->id == w->drawable.id) record->changed = TRUE;
     lorieOutputGeometryChanged();
     ScreenPtr screen = w->drawable.pScreen;
     screen->PositionWindow = position;

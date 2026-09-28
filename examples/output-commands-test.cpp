@@ -62,5 +62,26 @@ int main() {
     lorieCloseWindow(owner, 0xf0000001, true);
     assert(commands[18].operation == LORIE_OUTPUT_CLOSE && commands[18].window == 0xf0000001);
     assert(commands[18].down && !commands[12].down);
+    lorieOutputScroll(owner, 8, 12, .5f, .25f, .125f, -.25f);
+    assert(count == 20 && commands[19].operation == LORIE_OUTPUT_SCROLL);
+    assert(commands[19].horizontal == .125f && commands[19].vertical == -.25f);
+    assert(commands[19].x == 5000 && commands[19].y == 2500);
+    lorieOutputScroll(owner, 8, 12, 0, 0, 1000, -1000);
+    assert(commands[20].horizontal == 32 && commands[20].vertical == -32);
+    lorieOutputScroll(owner, 8, 12, NAN, 0, 1, 1);
+    lorieOutputScroll(owner, 8, 12, 0, 0, NAN, 1);
+    lorieOutputScroll(owner, 8, 12, 0, 0, 0, 0);
+    assert(count == 21);
+    lorieOutputTouch(owner, 8, 12, 31, LORIE_TOUCH_BEGIN, .2f, .3f, .8f);
+    assert(commands[21].detail == 31 && commands[21].phase == LORIE_TOUCH_BEGIN && commands[21].down);
+    assert(commands[21].pressure == .8f && commands[21].x == 2000);
+    lorieOutputTablet(owner, 8, 12, true, true, .2f, .3f, .7f, -.5f, .25f, 3);
+    assert(commands[22].eraser && commands[22].proximity && commands[22].buttons == 3);
+    assert(commands[22].tiltX == -.5f && commands[22].pressure == .7f);
+    lorieOutputCancelContacts(owner, 8, 12);
+    assert(commands[23].operation == LORIE_OUTPUT_CANCEL_CONTACTS);
+    lorieOutputTouch(owner, 8, 12, 32, LORIE_TOUCH_BEGIN, 0, 0, 1);
+    lorieOutputTablet(owner, 8, 12, false, true, 0, 0, 1, NAN, 0, 1);
+    assert(count == 24);
     puts("Semantic output commands preserve ordering, IDs, coordinates and state acknowledgements");
 }

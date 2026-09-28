@@ -1,6 +1,7 @@
 #include <dix-config.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <windowstr.h>
 #include <dix.h>
 #include <resource.h>
@@ -12,6 +13,7 @@
 #include "window_model.h"
 #include "window_placement.h"
 #include "window_size.h"
+#include "direct_input.h"
 
 extern ScreenPtr pScreenPtr;
 extern DeviceIntPtr lorieMouse, lorieKeyboard;
@@ -77,6 +79,8 @@ static void outputButton(OutputSelection* output, int button, Bool down) {
 }
 
 static void releaseInput(OutputSelection* output) {
+    lorieDirectInputRelease(output->id);
+    lorieDataPointer(output->id, output->window, 1, FALSE);
     // A destroyed client cannot receive the host's later key/button-up. Release
     // this output's leases now, without releasing a key still held by another view.
     for (int key = 8; key <= 255; key++) outputKey(output, key, FALSE);
@@ -95,6 +99,7 @@ void lorieReleaseOutputButton(uint32_t id, uint32_t window, int button) {
     if (button < 1 || button > 7) return;
     for (OutputSelection* output = selections; output; output = output->next)
         if (output->id == id && output->window == window) {
+            if (button == 1) lorieDirectInputRelease(id);
             outputButton(output, button, FALSE);
             return;
         }
@@ -219,6 +224,10 @@ void lorieOutputCommand(const lorieEvent* event) {
         lorieWindowMaximizedConfirm(event->output.window, (uint32_t)event->output.x, (unsigned)event->output.y);
         return;
     }
+    if (event->output.operation == LORIE_OUTPUT_INTERACTION_CONFIRM) {
+        lorieWindowInteractionConfirm(event->output.window, (uint32_t)event->output.x, (unsigned)event->output.y);
+        return;
+    }
     if (!event->output.output) return;
     OutputSelection** link = &selections;
     while (*link && (*link)->id != event->output.output) link = &(*link)->next;
@@ -279,13 +288,31 @@ void lorieOutputCommand(const lorieEvent* event) {
         if (output->window) lorieWindowBlur(window);
         return;
     }
+    if (event->output.operation == LORIE_OUTPUT_CANCEL_CONTACTS) {
+        lorieDirectInputRelease(output->id);
+        lorieDataPointer(output->id, output->window, 1, (output->buttons & (1u << 1)) != 0);
+        return;
+    }
+    if ((event->output.operation == LORIE_OUTPUT_KEY && event->output.down)
+            || (event->output.operation == LORIE_OUTPUT_POINTER && event->output.down && event->output.detail)
+            || (event->output.operation == LORIE_OUTPUT_TOUCH && event->output.phase == LORIE_TOUCH_BEGIN)
+            || (event->output.operation == LORIE_OUTPUT_TABLET && event->output.down)
+            || event->output.operation == LORIE_OUTPUT_TEXT)
+        lorieWindowUserInput(output->window);
     if (output->window && (event->output.operation == LORIE_OUTPUT_FOCUS ||
             event->output.operation == LORIE_OUTPUT_KEY || event->output.operation == LORIE_OUTPUT_TEXT ||
             (!output->shell && event->output.down))) {
         lorieWindowFocus(window);
     }
-    if (event->output.operation == LORIE_OUTPUT_POINTER) {
-        lorieDataPointer(output->id, output->window, event->output.detail, event->output.down);
+    if (event->output.operation == LORIE_OUTPUT_TOUCH || event->output.operation == LORIE_OUTPUT_TABLET) {
+        int x, y;
+        if (!lorieOutputPoint(output->id, output->window, event->output.x, event->output.y, &window, &x, &y)) return;
+        lorieCursorSelect(output->id, output->window);
+        lorieDirectInput(output->id, &event->output, x, y);
+        lorieDataPointer(output->id, output->window, 1, lorieDirectInputPressed(output->id));
+    } else if (event->output.operation == LORIE_OUTPUT_POINTER || event->output.operation == LORIE_OUTPUT_SCROLL) {
+        if (event->output.operation == LORIE_OUTPUT_POINTER)
+            lorieDataPointer(output->id, output->window, event->output.detail, event->output.down);
         ValuatorMask mask;
         valuator_mask_zero(&mask);
         int x, y;
@@ -294,7 +321,14 @@ void lorieOutputCommand(const lorieEvent* event) {
         valuator_mask_set_double(&mask, 0, x);
         valuator_mask_set_double(&mask, 1, y);
         QueuePointerEvents(lorieMouse, MotionNotify, 0, POINTER_ABSOLUTE | POINTER_SCREEN | POINTER_NORAW, &mask);
-        if (event->output.detail >= 1 && event->output.detail <= 7)
+        if (event->output.operation == LORIE_OUTPUT_SCROLL) {
+            float h = event->output.horizontal, v = event->output.vertical;
+            if (!isfinite(h) || !isfinite(v) || fabsf(h) > 32 || fabsf(v) > 32) return;
+            valuator_mask_zero(&mask);
+            if (h) valuator_mask_set_double(&mask, 2, h);
+            if (v) valuator_mask_set_double(&mask, 3, v);
+            if (h || v) QueuePointerEvents(lorieMouse, MotionNotify, 0, POINTER_RELATIVE, &mask);
+        } else if (event->output.detail >= 1 && event->output.detail <= 7)
             outputButton(output, event->output.detail, event->output.down);
     } else if (event->output.operation == LORIE_OUTPUT_KEY &&
             event->output.detail >= 8 && event->output.detail <= 255) {
@@ -357,11 +391,10 @@ void loriePrepareOutputs(void) {
             int width = output->ownsSize ? output->width : window->drawable.width;
             int height = output->ownsSize ? output->height : window->drawable.height;
             if (output->ownsSize) {
-                int minWidth = 1, minHeight = 1, maxWidth = INT32_MAX, maxHeight = INT32_MAX;
-                lorieWindowConstrainSize(window, &minWidth, &minHeight);
-                lorieWindowConstrainSize(window, &maxWidth, &maxHeight);
-                lorieHostWindowSize(minWidth, minHeight, maxWidth, maxHeight, &width, &height);
-                lorieWindowConstrainSize(window, &width, &height);
+                LorieWindowConstraints constraints = lorieWindowConstraints(window);
+                lorieHostWindowSize(&constraints, &width, &height);
+                width = max(constraints.minWidth, min(constraints.maxWidth, width));
+                height = max(constraints.minHeight, min(constraints.maxHeight, height));
             }
             int x = max(0, window->drawable.x), y = max(0, window->drawable.y);
             // Composite can expose off-screen pixels, but X input is clipped to the root.

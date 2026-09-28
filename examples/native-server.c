@@ -12,9 +12,9 @@ static void ready(void* unused, const char* display) {
     lorieServerStop();
 }
 
-static void windowSize(int minWidth, int minHeight, int maxWidth, int maxHeight, int* width, int* height) {
-    *width = *width < minWidth ? minWidth : *width > maxWidth ? maxWidth : *width;
-    *height = *height < minHeight ? minHeight : *height > maxHeight ? maxHeight : *height;
+static void windowSize(const LorieWindowConstraints* c, int* width, int* height) {
+    *width = *width < c->minWidth ? c->minWidth : *width > c->maxWidth ? c->maxWidth : *width;
+    *height = *height < c->minHeight ? c->minHeight : *height > c->maxHeight ? c->maxHeight : *height;
 }
 
 int main(int argc, char** argv) {

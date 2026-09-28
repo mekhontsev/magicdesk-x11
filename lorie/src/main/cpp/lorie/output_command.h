@@ -9,7 +9,9 @@ enum LorieOutputOperation {
     LORIE_OUTPUT_OBSERVE = 7, LORIE_OUTPUT_CLOSE = 8, LORIE_OUTPUT_DPI = 9,
     LORIE_OUTPUT_FULLSCREEN_CONFIRM = 10, LORIE_OUTPUT_INSPECT = 11,
     LORIE_OUTPUT_SHELL = 12, LORIE_OUTPUT_VIEWPORT = 13, LORIE_OUTPUT_BLUR = 14,
-    LORIE_OUTPUT_MAXIMIZED_CONFIRM = 15
+    LORIE_OUTPUT_MAXIMIZED_CONFIRM = 15, LORIE_OUTPUT_SCROLL = 16,
+    LORIE_OUTPUT_TOUCH = 17, LORIE_OUTPUT_TABLET = 18, LORIE_OUTPUT_CANCEL_CONTACTS = 19,
+    LORIE_OUTPUT_INTERACTION_CONFIRM = 20
 };
 
 typedef struct {
@@ -19,6 +21,9 @@ typedef struct {
     uint16_t detail;
     uint32_t serial;
     LorieShellRect viewport;
+    float horizontal, vertical;
+    float pressure, tiltX, tiltY;
+    uint8_t phase, buttons, eraser, proximity;
 } LorieOutputCommand;
 
 void lorieSendOutputCommand(LorieConnection*, const LorieOutputCommand*);

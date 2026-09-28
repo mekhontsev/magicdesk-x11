@@ -168,7 +168,9 @@ typedef union {
         uint8_t t, removed, mapped, hasIcon;
         uint32_t window, fullscreenSerial;
         LorieMaximizedState maximized;
-        uint32_t parent, width, height, minWidth, minHeight, maxWidth, maxHeight;
+        LorieWindowInteraction interaction;
+        uint32_t parent, width, height;
+        LorieWindowConstraints constraints;
         uint8_t hostManaged, fullscreenRequested, fullscreenActual, role;
         char title[256];
         char instance[128], className[128];
@@ -184,8 +186,7 @@ void lorieDensityReset(void);
 void lorieSetDpi(int dpi);
 void lorieOutputCommand(const lorieEvent* event);
 void lorieEmbeddedServerReady(void);
-void lorieHostWindowSize(int minWidth, int minHeight, int maxWidth, int maxHeight,
-        int* width, int* height);
+void lorieHostWindowSize(const LorieWindowConstraints*, int* width, int* height);
 void lorieOutputWindowDestroyed(XID id);
 void lorieOutputGeometryChanged(void);
 void loriePrepareOutputs(void);

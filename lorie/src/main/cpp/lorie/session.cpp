@@ -101,11 +101,10 @@ struct LorieConnection {
             .management = {.managed = header.windowInfo.hostManaged != 0,
                 .request = {.serial = header.windowInfo.fullscreenSerial, .fullscreen = header.windowInfo.fullscreenRequested != 0},
                 .actual = {.fullscreen = header.windowInfo.fullscreenActual != 0},
-                .maximized = header.windowInfo.maximized},
+                .maximized = header.windowInfo.maximized, .interaction = header.windowInfo.interaction},
             .parent = header.windowInfo.parent,
             .width = (int)header.windowInfo.width, .height = (int)header.windowInfo.height,
-            .minWidth = (int)header.windowInfo.minWidth, .minHeight = (int)header.windowInfo.minHeight,
-            .maxWidth = (int)header.windowInfo.maxWidth, .maxHeight = (int)header.windowInfo.maxHeight};
+            .constraints = header.windowInfo.constraints};
         callbacks.window(context, header.windowInfo.window, header.windowInfo.removed ? nullptr : &info);
         windowPending = false; windowIconBytes = 0;
         return 1;

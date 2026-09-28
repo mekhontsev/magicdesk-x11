@@ -524,9 +524,8 @@ int lorieServerConnect(void) {
 
 void lorieEmbeddedServerReady(void) { serverCallbacks.ready(serverContext, display); }
 
-void lorieHostWindowSize(int minWidth, int minHeight, int maxWidth, int maxHeight,
-        int* width, int* height) {
-    serverCallbacks.windowSize(minWidth, minHeight, maxWidth, maxHeight, width, height);
+void lorieHostWindowSize(const LorieWindowConstraints* constraints, int* width, int* height) {
+    serverCallbacks.windowSize(constraints, width, height);
 }
 
 void lorieServerStop(void) {

@@ -30,12 +30,48 @@ void loriePresentShell(LorieConnection* c, uint32_t output, uint32_t window, uin
 void lorieOutputResize(LorieConnection* c, uint32_t output, uint32_t window, int width, int height) {
     send(c, LORIE_OUTPUT_RESIZE, output, window, width, height);
 }
+static int32_t coordinate(float value) {
+    return (int32_t)std::floor((double)(std::clamp(value, 0.f, 1.f) * 10000.f) + .5);
+}
 void lorieOutputPointer(LorieConnection* c, uint32_t output, uint32_t window, float x, float y, uint16_t button, bool down) {
-    auto coordinate = [](float value) { return (int32_t)std::floor((double)(std::clamp(value, 0.f, 1.f) * 10000.f) + .5); };
+    if (!std::isfinite(x) || !std::isfinite(y)) return;
     send(c, LORIE_OUTPUT_POINTER, output, window, coordinate(x), coordinate(y), button, down);
+}
+void lorieOutputScroll(LorieConnection* c, uint32_t output, uint32_t window, float x, float y, float horizontal, float vertical) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(horizontal) || !std::isfinite(vertical)) return;
+    LorieOutputCommand command{};
+    command.operation = LORIE_OUTPUT_SCROLL; command.output = output; command.window = window;
+    command.x = coordinate(x); command.y = coordinate(y);
+    command.horizontal = std::clamp(horizontal, -32.f, 32.f);
+    command.vertical = std::clamp(vertical, -32.f, 32.f);
+    if (command.horizontal || command.vertical) lorieSendOutputCommand(c, &command);
 }
 void lorieOutputKey(LorieConnection* c, uint32_t output, uint32_t window, uint16_t xKeyCode, bool down) {
     send(c, LORIE_OUTPUT_KEY, output, window, 0, 0, xKeyCode, down);
+}
+void lorieOutputTouch(LorieConnection* c, uint32_t output, uint32_t window, uint16_t contact,
+        LorieTouchPhase phase, float x, float y, float pressure) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(pressure) || pressure < 0 || pressure > 1
+            || contact > 31 || phase < LORIE_TOUCH_BEGIN || phase > LORIE_TOUCH_END) return;
+    LorieOutputCommand command{};
+    command.operation = LORIE_OUTPUT_TOUCH; command.output = output; command.window = window;
+    command.x = coordinate(x); command.y = coordinate(y); command.pressure = pressure;
+    command.detail = contact; command.phase = phase; command.down = phase == LORIE_TOUCH_BEGIN;
+    lorieSendOutputCommand(c, &command);
+}
+void lorieOutputTablet(LorieConnection* c, uint32_t output, uint32_t window, bool eraser, bool proximity,
+        float x, float y, float pressure, float tiltX, float tiltY, unsigned buttons) {
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(pressure) || pressure < 0 || pressure > 1
+            || !std::isfinite(tiltX) || !std::isfinite(tiltY) || (buttons & ~7u)) return;
+    LorieOutputCommand command{};
+    command.operation = LORIE_OUTPUT_TABLET; command.output = output; command.window = window;
+    command.x = coordinate(x); command.y = coordinate(y); command.pressure = pressure;
+    command.tiltX = tiltX; command.tiltY = tiltY; command.buttons = buttons;
+    command.eraser = eraser; command.proximity = proximity; command.down = buttons & 1;
+    lorieSendOutputCommand(c, &command);
+}
+void lorieOutputCancelContacts(LorieConnection* c, uint32_t output, uint32_t window) {
+    send(c, LORIE_OUTPUT_CANCEL_CONTACTS, output, window);
 }
 void lorieOutputText(LorieConnection* c, uint32_t output, uint32_t window, uint32_t codePoint) {
     send(c, LORIE_OUTPUT_TEXT, output, window, (int32_t)codePoint);
@@ -64,4 +100,8 @@ void lorieConfirmWindowState(LorieConnection* c, uint32_t window, uint32_t reque
 void lorieConfirmMaximized(LorieConnection* c, uint32_t window, uint32_t requestSerial, unsigned axes) {
     if (axes & ~3u) return;
     send(c, LORIE_OUTPUT_MAXIMIZED_CONFIRM, 0, window, (int32_t)requestSerial, (int32_t)axes);
+}
+void lorieConfirmInteraction(LorieConnection* c, uint32_t window, uint32_t requestSerial, unsigned flags) {
+    if (flags & ~7u) return;
+    send(c, LORIE_OUTPUT_INTERACTION_CONFIRM, 0, window, (int32_t)requestSerial, (int32_t)flags);
 }

@@ -644,7 +644,8 @@ static void beginExport(void) {
 }
 
 void lorieDataPointer(uint32_t output, uint32_t window, int button, Bool down) {
-    if (button == 1) { pointerDown = down; pointerOutput = output; pointerWindow = window; }
+    if (button != 1 || (!down && (pointerOutput != output || pointerWindow != window))) return;
+    pointerDown = down; pointerOutput = output; pointerWindow = window;
 }
 
 void lorieDataCommand(const LorieDataEvent* event, int fd) {

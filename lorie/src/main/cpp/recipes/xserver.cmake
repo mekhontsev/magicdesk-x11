@@ -289,6 +289,7 @@ add_library(LorieNative STATIC
         "lorie/InitOutput.c"
         "lorie/cursor.c"
         "lorie/InitInput.c"
+        "lorie/direct_input.c"
         "lorie/InputXKB.c"
         "lorie/renderer.cpp"
         "lorie/renderer_outputs.cpp"

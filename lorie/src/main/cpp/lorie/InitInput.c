@@ -37,6 +37,7 @@ from The Open Group.
 #include "xserver-properties.h"
 #include "exevents.h"
 #include "lorie.h"
+#include "direct_input.h"
 
 #define XI_PEN	"TERMUX-X11 PEN"
 #define XI_ERASER	"TERMUX-X11 ERASER"
@@ -145,7 +146,7 @@ static int
 lorieTouchProc(DeviceIntPtr device, int what) {
 #define NTOUCHPOINTS 20
 #define NBUTTONS 1
-#define NAXES 2
+#define NAXES 3
     Atom btn_labels[NBUTTONS] = { 0 };
     BYTE map[NBUTTONS + 1] = { 0 };
     Atom axes_labels[NAXES] = { 0 };
@@ -154,16 +155,18 @@ lorieTouchProc(DeviceIntPtr device, int what) {
         case DEVICE_INIT:
             device->public.on = FALSE;
 
-            map[0] = 1;
+            map[1] = 1;
             btn_labels[0] = XIGetKnownProperty(BTN_LABEL_PROP_BTN_LEFT);
             axes_labels[0] = XIGetKnownProperty(AXIS_LABEL_PROP_ABS_MT_POSITION_X);
             axes_labels[1] = XIGetKnownProperty(AXIS_LABEL_PROP_ABS_MT_POSITION_Y);
+            axes_labels[2] = XIGetKnownProperty(AXIS_LABEL_PROP_ABS_MT_PRESSURE);
 
             if (!InitValuatorClassDeviceStruct(device, NAXES, axes_labels, GetMotionHistorySize(), Absolute)
             ||  !InitButtonClassDeviceStruct(device, NBUTTONS, btn_labels, map)
             ||  !InitTouchClassDeviceStruct(device, NTOUCHPOINTS, XIDirectTouch, NAXES)
             ||  !InitValuatorAxisStruct(device, 0, axes_labels[0], 0, 0xFFFF, 10000, 0, 10000, Absolute)
-            ||  !InitValuatorAxisStruct(device, 1, axes_labels[1], 0, 0xFFFF, 10000, 0, 10000, Absolute))
+            ||  !InitValuatorAxisStruct(device, 1, axes_labels[1], 0, 0xFFFF, 10000, 0, 10000, Absolute)
+            ||  !InitValuatorAxisStruct(device, 2, axes_labels[2], 0, 0xFFFF, 1, 0, 1, Absolute))
                 return BadValue;
 
             return Success;
@@ -216,6 +219,7 @@ lorieStylusProc(DeviceIntPtr device, int what) {
                 || !InitValuatorAxisStruct(device, 4, axes_labels[4], -64, 63, 57, 0, 57, Absolute) // tilt y
                 || !InitValuatorAxisStruct(device, 5, axes_labels[5], -900, 899, 1, 0, 1, Absolute) // abs wheel (airbrush) or rotation (artpen)
                 || !InitPtrFeedbackClassDeviceStruct(device, (PtrCtrlProcPtr) NoopDDA)
+                || !InitProximityClassDeviceStruct(device)
                 || !InitButtonClassDeviceStruct(device, NBUTTONS, btn_labels, map))
                 return BadValue;
 
@@ -242,6 +246,7 @@ lorieSetStylusEnabled(Bool enabled) {
     if (enabled) {
         if (loriePen == NULL) {
             loriePen = AddInputDevice(serverClient, lorieStylusProc, TRUE);
+            if (!loriePen) return;
             AssignTypeAndName(loriePen, MakeAtom(XI_PEN, sizeof(XI_PEN) - 1, TRUE), "Lorie pen");
             ActivateDevice(loriePen, FALSE);
             EnableDevice(loriePen, TRUE);
@@ -249,6 +254,7 @@ lorieSetStylusEnabled(Bool enabled) {
         }
         if (lorieEraser == NULL) {
             lorieEraser = AddInputDevice(serverClient, lorieStylusProc, TRUE);
+            if (!lorieEraser) return;
             AssignTypeAndName(lorieEraser, MakeAtom(XI_ERASER, sizeof(XI_ERASER) - 1, TRUE), "Lorie eraser");
             ActivateDevice(lorieEraser, FALSE);
             EnableDevice(lorieEraser, TRUE);
@@ -268,6 +274,7 @@ lorieSetStylusEnabled(Bool enabled) {
 
 void
 InitInput(__unused int argc, __unused char *argv[]) {
+    lorieDirectInputReset();
     lorieMouse = AddInputDevice(serverClient, lorieMouseProc, TRUE);
     lorieTouch = AddInputDevice(serverClient, lorieTouchProc, TRUE);
     lorieKeyboard = AddInputDevice(serverClient, lorieKeybdProc, TRUE);
@@ -285,7 +292,7 @@ InitInput(__unused int argc, __unused char *argv[]) {
     AttachDevice(NULL, lorieKeyboard, inputInfo.keyboard);
 
     // We should explicitly create stylus pen and eraser devices here for the case of X server reset.
-    if (loriePen && lorieEraser) {
+    if (loriePen || lorieEraser) {
         loriePen = lorieEraser = NULL;
         lorieSetStylusEnabled(true);
     }

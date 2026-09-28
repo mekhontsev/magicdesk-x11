@@ -10,6 +10,7 @@
 #include "family_geometry.h"
 #include "graphics.h"
 #include "maximized_state.h"
+#include "window_size.h"
 
 
 #ifdef __cplusplus
@@ -20,8 +21,7 @@ typedef struct {
     void (*ready)(void* context, const char* display);
     // Pure host layout policy, on the X server thread. Validated positive pixel
     // limits; width/height initially contain the retained Surface offer.
-    void (*windowSize)(int minWidth, int minHeight, int maxWidth, int maxHeight,
-            int* width, int* height);
+    void (*windowSize)(const LorieWindowConstraints*, int* width, int* height);
 } LorieServerCallbacks;
 
 // One server per process. Start on a prepared Android Looper; callbacks run on
@@ -33,6 +33,7 @@ void lorieServerStop(void);
 int lorieServerConnect(void);
 
 typedef struct LorieConnection LorieConnection;
+#include "window_interaction.h"
 typedef struct {
     uint32_t serial;
     bool fullscreen;
@@ -45,6 +46,7 @@ typedef struct {
     LorieWindowRequest request;
     LorieWindowState actual;
     LorieMaximizedState maximized;
+    LorieWindowInteraction interaction;
 } LorieWindowManagement;
 typedef struct {
     const char* title;
@@ -55,7 +57,8 @@ typedef struct {
     LorieWindowRole role;
     LorieWindowManagement management;
     uint32_t parent;
-    int width, height, minWidth, minHeight, maxWidth, maxHeight;
+    int width, height;
+    LorieWindowConstraints constraints;
 } LorieWindowInfo;
 
 typedef struct {
@@ -102,6 +105,15 @@ void loriePresentShell(LorieConnection*, uint32_t output, uint32_t window, uint3
 void lorieOutputResize(LorieConnection*, uint32_t output, uint32_t window, int width, int height);
 // Finite coordinates normalized to content, excluding host letterboxing; clipped to [0,1]. Button 0 is motion.
 void lorieOutputPointer(LorieConnection*, uint32_t output, uint32_t window, float x, float y, uint16_t button, bool down);
+// Fractional wheel units, positive right/down; the X server emulates core wheel buttons.
+void lorieOutputScroll(LorieConnection*, uint32_t output, uint32_t window, float x, float y, float horizontal, float vertical);
+typedef enum { LORIE_TOUCH_BEGIN, LORIE_TOUCH_UPDATE, LORIE_TOUCH_END } LorieTouchPhase;
+void lorieOutputTouch(LorieConnection*, uint32_t output, uint32_t window, uint16_t contact,
+        LorieTouchPhase phase, float x, float y, float pressure);
+// Pressure [0,1], tilt in radians; buttons tip=1, primary barrel=2, secondary barrel=4.
+void lorieOutputTablet(LorieConnection*, uint32_t output, uint32_t window, bool eraser, bool proximity,
+        float x, float y, float pressure, float tiltX, float tiltY, unsigned buttons);
+void lorieOutputCancelContacts(LorieConnection*, uint32_t output, uint32_t window);
 void lorieOutputKey(LorieConnection*, uint32_t output, uint32_t window, uint16_t xKeyCode, bool down);
 void lorieOutputText(LorieConnection*, uint32_t output, uint32_t window, uint32_t codePoint);
 void lorieOutputFocus(LorieConnection*, uint32_t output, uint32_t window);
@@ -114,6 +126,7 @@ void lorieCloseWindow(LorieConnection*, uint32_t window, bool force);
 void lorieSetScreenDpi(LorieConnection*, int dpi);
 void lorieConfirmWindowState(LorieConnection*, uint32_t window, uint32_t requestSerial, LorieWindowState actual);
 void lorieConfirmMaximized(LorieConnection*, uint32_t window, uint32_t requestSerial, unsigned axes);
+void lorieConfirmInteraction(LorieConnection*, uint32_t window, uint32_t requestSerial, unsigned flags);
 void lorieConnectionData(LorieConnection* connection, int operation, int channel,
         uint32_t serial, uint32_t offer, uint32_t output, uint32_t window,
         int x, int y, const char* type, int borrowedDescriptor);

@@ -14,7 +14,8 @@ on that thread at ddxReady, after sockets and input are initialized. Only then
 may the host connect or request normal shutdown. Server exit ends that isolated
 process. Host authorization and start/stop races must be resolved by the host.
 The synchronous `windowSize` callback receives a retained individual-output offer
-and validated positive minimum/maximum pixel limits. The host computes its layout
+and `LorieWindowConstraints`: validated minimum/maximum pixel limits and typed
+base/increment/aspect rules. The host computes its paired-size layout
 policy without Java or X objects; the engine validates the result before applying
 it. It runs only during size/geometry reconciliation, not on animation frames.
 Root and borrowed outputs do not invoke it. The host must not block or re-enter
@@ -36,12 +37,27 @@ Window snapshots include the two `WM_CLASS` strings as bounded, untruncated
 ICCCM string values (empty when absent, malformed or oversized). Property changes
 republish metadata; launch correlation belongs to the host, not the engine.
 Snapshots also include current client dimensions, `WM_TRANSIENT_FOR` and
-validated minimum/maximum dimensions from `WM_NORMAL_HINTS`, in X pixel units.
-A zero maximum is unspecified. Android placement and decorations are not part
+validated dimensions and resize rules from `WM_NORMAL_HINTS`, in X pixel units.
+Native limits are bounded by `LORIE_WINDOW_SIZE_LIMIT`; host adapters may publish
+that default maximum as unspecified. Android placement and decorations are not part
 of this contract.
 Catalog roles distinguish dialogs from application and provisional startup
 windows, including dialogs without `WM_TRANSIENT_FOR`. The host decides which
 roles may own a persistent launch or placement identity.
+
+`lorieOutputScroll` carries fractional XI2 axes; Xorg alone emulates legacy wheel
+buttons. `lorieOutputTouch` carries contact identity, phase and pressure;
+`lorieOutputTablet` carries pen/eraser proximity, pressure, tilt in radians and
+semantic buttons. Direct input uses bounded static state, reset with the X input
+devices and released per output on blur, cancellation or destruction. The host
+must keep touchpad gestures distinct from direct touchscreen contacts.
+
+Window interaction snapshots carry a revision, activation/minimization action and
+attention. `lorieConfirmInteraction` acknowledges observed active/minimized/attention
+bits through the host that owns the window. The engine publishes EWMH/ICCCM state,
+retaining the X surface while an Android host is concealed. Host-delivered input
+timestamps gate activation; the host additionally decides whether its session can
+receive focus. A guest WM owns these operations when present.
 
 Each output selects XID zero (the whole screen) or a Composite window family.
 Surface calls borrow ANativeWindow; the renderer retains its own reference and

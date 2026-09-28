@@ -11,6 +11,8 @@ void lorieWindowManagerReady(void);
 Bool lorieWindowManagerExternal(void);
 void lorieWindowFullscreenConfirm(XID window, uint32_t serial, Bool fullscreen);
 void lorieWindowMaximizedConfirm(XID window, uint32_t serial, unsigned axes);
+void lorieWindowInteractionConfirm(XID window, uint32_t serial, unsigned flags);
+void lorieWindowUserInput(XID window);
 Bool lorieWindowGestureAllowed(XID window, unsigned button);
 Bool lorieWindowBelongsTo(WindowPtr window, WindowPtr owner);
 void lorieWindowFamily(WindowPtr owner, void (*visit)(WindowPtr, void*), void* data);
@@ -18,5 +20,5 @@ void lorieWindowFamilyGeometry(WindowPtr owner, Bool childrenOnly, LorieFamilyGe
 void lorieWindowFocus(WindowPtr window);
 void lorieWindowBlur(WindowPtr window);
 void lorieWindowClose(XID window, Bool force);
-void lorieWindowConstrainSize(WindowPtr window, int* width, int* height);
+LorieWindowConstraints lorieWindowConstraints(WindowPtr window);
 WindowPtr lorieWindowInitialDialogParent(WindowPtr window);
