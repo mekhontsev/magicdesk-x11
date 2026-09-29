@@ -76,7 +76,17 @@
          InputThreadInit();
  
 +++ ./include/os.h
-@@ -557,6 +557,8 @@
+@@ -170,7 +170,8 @@
+ 
+ extern _X_EXPORT void ListenOnOpenFD(int /* fd */ , int /* noxauth */ );
+ 
+-extern _X_EXPORT Bool AddClientOnOpenFD(int /* fd */ );
++/* Consumes a connected descriptor; the normal X11 authorization handshake remains mandatory. */
++extern _X_EXPORT void AddAuthenticatedClientOnOpenFD(int fd);
+ 
+ #ifdef MONOTONIC_CLOCK
+ extern void ForceClockId(clockid_t /* forced_clockid */);
+@@ -557,6 +558,8 @@
  extern _X_EXPORT void
  ddxGiveUp(enum ExitCode error);
  extern _X_EXPORT void
@@ -136,6 +146,42 @@
          RunFromSmartParent = TRUE;
      OsSignal(SIGUSR1, handler);
      ParentProcess = getppid();
+@@ -1054,8 +1055,8 @@
+ }
+ 
+ /* based on TRANS(SocketUNIXAccept) (XtransConnInfo ciptr, int *status) */
+-Bool
+-AddClientOnOpenFD(int fd)
++void
++AddAuthenticatedClientOnOpenFD(int fd)
+ {
+     XtransConnInfo ciptr;
+     CARD32 connect_time;
+@@ -1063,20 +1064,18 @@
+ 
+     snprintf(port, sizeof(port), ":%d", atoi(display));
+     ciptr = _XSERVTransReopenCOTSServer(5, fd, port);
+-    if (ciptr == NULL)
+-        return FALSE;
++    if (ciptr == NULL) {
++        close(fd);
++        return;
++    }
+ 
+     _XSERVTransSetOption(ciptr, TRANS_NONBLOCKING, 1);
+-    ciptr->flags |= TRANS_NOXAUTH;
+ 
+     connect_time = GetTimeInMillis();
+ 
+     if (!AllocNewConnection(ciptr, fd, connect_time)) {
+         ErrorConnMax(ciptr);
+-        return FALSE;
+     }
+-
+-    return TRUE;
+ }
+ 
+ Bool
 +++ ./os/osinit.c
 @@ -170,13 +170,11 @@
  #endif

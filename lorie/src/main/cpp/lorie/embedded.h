@@ -31,6 +31,8 @@ bool lorieServerStart(int count, const char* const* arguments,
 void lorieServerStop(void);
 // Caller owns the returned socket. Replaces the previous renderer connection.
 int lorieServerConnect(void);
+/* Consumes a connected X11 client socket, including on failure. Keeps X11 authentication. */
+void lorieServerAcceptClient(int fd);
 
 typedef struct LorieConnection LorieConnection;
 #include "window_interaction.h"

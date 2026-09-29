@@ -13,6 +13,11 @@ The engine copies arguments and `LorieServerCallbacks` and starts its X thread. 
 on that thread at ddxReady, after sockets and input are initialized. Only then
 may the host connect or request normal shutdown. Server exit ends that isolated
 process. Host authorization and start/stop races must be resolved by the host.
+`lorieServerAcceptClient` consumes an already connected X11 stream descriptor,
+including on queue failure. It enqueues admission on the X thread and preserves
+the normal X11 authorization handshake; it is distinct from the renderer's
+`lorieServerConnect` connection. The host owns listener policy and descriptor
+delivery, without adding Binder or platform identity to the native contract.
 The synchronous `windowSize` callback receives a retained individual-output offer
 and `LorieWindowConstraints`: validated minimum/maximum pixel limits and typed
 base/increment/aspect rules. The host computes its paired-size layout

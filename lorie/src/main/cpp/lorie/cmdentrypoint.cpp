@@ -522,6 +522,15 @@ int lorieServerConnect(void) {
     return client[0];
 }
 
+void lorieServerAcceptClient(int fd) {
+    if (fd < 0) return;
+    if (!QueueWorkProc(+[](__unused ClientPtr, void* closure) -> Bool {
+        AddAuthenticatedClientOnOpenFD((int) (intptr_t) closure);
+        return TRUE;
+    }, nullptr, (void*) (intptr_t) fd)) { close(fd); return; }
+    lorieWakeServer();
+}
+
 void lorieEmbeddedServerReady(void) { serverCallbacks.ready(serverContext, display); }
 
 void lorieHostWindowSize(const LorieWindowConstraints* constraints, int* width, int* height) {
