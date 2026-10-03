@@ -522,6 +522,11 @@ Bool lorieWindowManagerExternal(void) {
 }
 
 void lorieWindowManagerReady(void) {
+    // ICCCM clients can query existing atoms before creating their first window.
+    // Closure is available to individual hosts even without the EWMH bridge.
+    atom("WM_PROTOCOLS");
+    atom("WM_DELETE_WINDOW");
+    atom("WM_TAKE_FOCUS");
     const char* enabled = getenv("MAGICDESK_X11_HOST_WM");
     if (!enabled || strcmp(enabled, "1")) return;
     managerSelection = atom("WM_S0");

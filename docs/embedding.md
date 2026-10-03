@@ -186,6 +186,10 @@ native fixtures, independent of Android Desktop self-tests.
 
 ### Window Discovery
 
+The window model interns the ICCCM protocol atoms before admitting clients.
+First-client queries with `only_if_exists` can discover `WM_DELETE_WINDOW`;
+individual hosts retain protocol closure without requiring the EWMH bridge.
+
 `MAGICDESK_X11_HOST_WM=1` enables the dedicated-application EWMH bridge before
 client startup. It owns `WM_S0`, publishes `_NET_SUPPORTING_WM_CHECK` and only
 the supported state hints, and yields if another window manager takes the
