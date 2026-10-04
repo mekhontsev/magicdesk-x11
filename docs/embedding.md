@@ -510,6 +510,40 @@ lets the toolkit cancel its own menu state; server-only grab release is not a
 client cancellation notification. Ordinary dialogs, the shell owner and other
 families are not unmapped. DND and tooltip surfaces are not popup-dismissal targets.
 
+## DRI3 Pixmap Export
+
+`BuffersFromPixmap` and the single-buffer `BufferFromPixmap` path export a live
+linear DMA-BUF, not a snapshot. Depth 24/32 with 32-bit storage is supported.
+Private regular pixmaps are promoted on first demand to `/dev/dma_heap/system`
+storage with 256-byte-aligned rows and full trailing-row allocation. Pixels and
+buffer identity are retained, and EXA receives the new byte pitch before further
+access. Each reply owns a duplicated close-on-exec FD. Re-export of an imported
+linear DMA-BUF preserves its backing, stride and offset.
+The legacy request reports the actual allocation size and rejects offsets or
+pitches that its older wire format cannot represent.
+
+CPU mappings use `DMA_BUF_IOCTL_SYNC` start/end around EXA access. Promotion
+requires exclusive, unlocked, unpublished CPU storage; allocation failure leaves
+it unchanged. Already shared ordinary memory and AHardwareBuffers are not
+replaced or passed off as DMA-BUFs. Unsupported export returns an X error, while
+ordinary SHM and Android presentation remain available. The heap is opened only
+on export; neither root, a DRM node, Vulkan nor EGL is required by the allocator.
+
+The Android buffer fixture checks denied allocation, ordinary-FD rejection, padded
+rows, identity, live updates and retained descriptor lifetime. The XCB protocol
+fixture additionally checks both export requests, depth-24/32 pixels, writes and
+readback after pitch changes, reimport, and rejection without client disconnect:
+
+```sh
+cc -O2 -Wall -Wextra -Werror -UNDEBUG examples/dri3-export.c \
+  -lxcb -lxcb-dri3 -o build/dri3-export
+DISPLAY=:0 build/dri3-export
+```
+
+Run it against the embedded X server with the session's Xauthority and normal
+socket routing. It requires working DMA-heap allocation in the server process;
+an unsupported device is not counted as a successful export test.
+
 ## Optional DMA Copy
 
 AHardwareBuffer sources retain upstream's deferred EGL Present queue. Linear

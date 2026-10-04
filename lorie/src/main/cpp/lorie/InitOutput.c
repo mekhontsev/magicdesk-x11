@@ -142,10 +142,11 @@ static LorieBuffer *lorieEnsureGpuSampleable(PixmapPtr pixmap, int8_t type) {
 
 LorieBuffer* lorieExportPixmap(PixmapPtr pixmap) {
     if (!pixmap) return NULL;
-    LorieBuffer* buffer = lorieEnsureGpuSampleable(pixmap,
-            pvfb->root.legacyDrawing ? LORIEBUFFER_FD : LORIEBUFFER_AHARDWAREBUFFER);
-    if (!buffer) return NULL;
     LoriePixmapPriv* priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    LorieBuffer* buffer = priv && LorieBuffer_isDmaBuf(priv->buffer) ? priv->buffer :
+            lorieEnsureGpuSampleable(pixmap,
+                    pvfb->root.legacyDrawing ? LORIEBUFFER_FD : LORIEBUFFER_AHARDWAREBUFFER);
+    if (!buffer) return NULL;
     priv->outputExported = true;
     if (priv->locked) {
         LorieBuffer_unlock(buffer);
@@ -1244,6 +1245,54 @@ static int lorieGetFormats(__unused ScreenPtr screen, CARD32 *num_formats, CARD3
     return TRUE;
 }
 
+static int lorieFdsFromPixmap(ScreenPtr screen, PixmapPtr pixmap, int *fds,
+        uint32_t *strides, uint32_t *offsets, uint64_t *modifier) {
+    LoriePixmapPriv *priv = LORIE_PIXMAP_PRIV_FROM_PIXMAP(pixmap);
+    if (!priv || !priv->buffer || priv->mem || pixmap->drawable.bitsPerPixel != 32 ||
+        (pixmap->drawable.depth != 24 && pixmap->drawable.depth != 32)) return 0;
+    bool locked = priv->locked != NULL;
+    if (locked) {
+        if (LorieBuffer_unlock(priv->buffer)) return 0;
+        priv->locked = NULL;
+    }
+    if (!LorieBuffer_makeDmaBuf(priv->buffer)) {
+        if (locked && LorieBuffer_lock(priv->buffer, &priv->locked))
+            FatalError("Cannot restore pixmap mapping after DRI3 export failure\n");
+        return 0;
+    }
+    screen->ModifyPixmapHeader(pixmap, 0, 0, 0, 0,
+                               LorieBuffer_description(priv->buffer)->stride * 4, NULL);
+    off_t offset = 0;
+    int fd = LorieBuffer_fileDescriptor(priv->buffer, &offset);
+    if (offset < 0 || (uint64_t)offset > UINT32_MAX) return 0;
+    fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    if (fd < 0) return 0;
+    // EXA now brackets CPU writes with DMA-BUF cache ownership. The descriptor
+    // continues to reference this pixmap's live backing, not an export snapshot.
+    fds[0] = fd;
+    strides[0] = LorieBuffer_description(priv->buffer)->stride * 4;
+    offsets[0] = (uint32_t)offset;
+    *modifier = DRM_FORMAT_MOD_LINEAR;
+    return 1;
+}
+
+static int lorieFdFromPixmap(ScreenPtr screen, PixmapPtr pixmap, CARD16 *stride, CARD32 *size) {
+    int fd;
+    uint32_t pitch, offset;
+    uint64_t modifier;
+    if (lorieFdsFromPixmap(screen, pixmap, &fd, &pitch, &offset, &modifier) != 1) return -1;
+    struct stat info;
+    // DRI3 1.0 has no offset or modifier and only a 16-bit pitch.
+    if (offset || pitch > UINT16_MAX || modifier != DRM_FORMAT_MOD_LINEAR ||
+        fstat(fd, &info) || info.st_size <= 0 || (uint64_t)info.st_size > UINT32_MAX) {
+        close(fd);
+        return -1;
+    }
+    *stride = pitch;
+    *size = info.st_size;
+    return fd;
+}
+
 static int lorieGetModifiers(__unused ScreenPtr screen, uint32_t format, uint32_t *num_modifiers, uint64_t **modifiers) {
     static uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
 
@@ -1260,7 +1309,8 @@ static int lorieGetModifiers(__unused ScreenPtr screen, uint32_t format, uint32_
 
 static dri3_screen_info_rec lorieDri3Info = {
         .version = 2,
-        .fds_from_pixmap = FalseNoop,
+        .fd_from_pixmap = lorieFdFromPixmap,
+        .fds_from_pixmap = lorieFdsFromPixmap,
         .pixmap_from_fds = loriePixmapFromFds,
         .get_formats = lorieGetFormats,
         .get_modifiers = lorieGetModifiers,

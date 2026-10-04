@@ -137,6 +137,13 @@ const LorieBuffer_Desc* _Nonnull LorieBuffer_description(LorieBuffer* _Nullable 
 // Borrowed linear storage; the caller must retain the LorieBuffer while importing it.
 int LorieBuffer_fileDescriptor(LorieBuffer* _Nullable buffer, off_t* _Nonnull offset);
 
+// True only for actual DMA-BUF storage, never ordinary shared memory.
+bool LorieBuffer_isDmaBuf(LorieBuffer* _Nullable buffer);
+// Promote unshared regular storage in place; preserve pixels and identity.
+// The caller must publish the resulting stride to its pixmap header.
+// Already exported/native hardware storage cannot be replaced by this operation.
+bool LorieBuffer_makeDmaBuf(LorieBuffer* _Nullable buffer);
+
 /**
  * Lock the AHardwareBuffer for direct CPU access.
  * See AHardwareBuffer_lock() description for details

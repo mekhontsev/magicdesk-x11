@@ -24,6 +24,7 @@
 #include "buffer.h"
 #include "buffer_layout.h"
 #include "socket_io.h"
+#include "dma_buffer.h"
 
 
 struct LorieBuffer {
@@ -38,6 +39,7 @@ struct LorieBuffer {
     size_t size;
     off_t offset;
     void* mapping;
+    bool dmaBuf;
 
     void* graphicsImage;
     void (*releaseGraphicsImage)(void*);
@@ -55,6 +57,10 @@ int LorieBuffer_fileDescriptor(LorieBuffer* buffer, off_t* offset) {
     if (!buffer || buffer->desc.type != LORIEBUFFER_FD) return -1;
     *offset = buffer->offset;
     return buffer->fd;
+}
+
+bool LorieBuffer_isDmaBuf(LorieBuffer* buffer) {
+    return buffer && buffer->dmaBuf;
 }
 
 void LorieBuffer_gpuCopyPendingDec(LorieBuffer* buffer) {
@@ -176,6 +182,11 @@ static LorieBuffer* allocate(int32_t width, int32_t stride, int32_t height, int8
             b.mapping = mmap(NULL, b.size, PROT_READ|PROT_WRITE, MAP_SHARED, b.fd, offset - delta);
             if (b.mapping == MAP_FAILED) { b.mapping = NULL; goto fail; }
             b.desc.data = (char*)b.mapping + delta;
+            int error = lorieDmaSync(b.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
+            if (!error) {
+                b.dmaBuf = true;
+                if (lorieDmaSync(b.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW)) goto fail;
+            }
             break;
         }
         case LORIEBUFFER_AHARDWAREBUFFER:
@@ -230,6 +241,42 @@ __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapFileDescriptor(int32_t width, int32
 
 __LIBC_HIDDEN__ LorieBuffer* LorieBuffer_wrapAHardwareBuffer(AHardwareBuffer* buffer) {
     return allocate(0, 0, 0, 0, LORIEBUFFER_AHARDWAREBUFFER, buffer, -1, 0, false);
+}
+
+bool LorieBuffer_makeDmaBuf(LorieBuffer* buffer) {
+    if (!buffer) return false;
+    if (buffer->dmaBuf) return true;
+    if (buffer->desc.type != LORIEBUFFER_REGULAR || buffer->refcount != 1 ||
+        buffer->locked || buffer->graphicsImage || buffer->gpuCopyPending) return false;
+    // Export a cache-line-aligned linear image, with full trailing-row storage.
+    // Its explicit pitch travels in DRI3; it is not an inferred gralloc layout.
+    if (buffer->desc.width > INT32_MAX / 4 - 63) return false;
+    int32_t stride = (buffer->desc.width + 63) & ~63;
+    size_t size;
+    if (!lorieBufferLayout(stride, stride, buffer->desc.height, 0, &size)) return false;
+    int fd = lorieDmaAllocate(size);
+    if (fd < 0) return false;
+    void *data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) { close(fd); return false; }
+    if (lorieDmaSync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW)) goto fail;
+    for (int y = 0; y < buffer->desc.height; ++y)
+        memcpy((char *)data + (size_t)y * stride * 4,
+               (char *)buffer->desc.data + (size_t)y * buffer->desc.stride * 4,
+               (size_t)buffer->desc.width * 4);
+    if (lorieDmaSync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW)) goto fail;
+    free(buffer->desc.data);
+    buffer->desc.type = LORIEBUFFER_FD;
+    buffer->desc.data = data;
+    buffer->desc.stride = stride;
+    buffer->mapping = data;
+    buffer->size = size;
+    buffer->fd = fd;
+    buffer->dmaBuf = true;
+    return true;
+fail:
+    munmap(data, size);
+    close(fd);
+    return false;
 }
 
 __LIBC_HIDDEN__ void LorieBuffer_convert(LorieBuffer* buffer, int8_t type, int8_t format) {
@@ -342,7 +389,10 @@ __LIBC_HIDDEN__ int LorieBuffer_lock(LorieBuffer* buffer, void** out) {
         return EEXIST;
     }
 
-    if (buffer->desc.type == LORIEBUFFER_REGULAR || buffer->desc.type == LORIEBUFFER_FD)
+    if (buffer->dmaBuf) {
+        ret = lorieDmaSync(buffer->fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW);
+        if (!ret) buffer->lockedData = buffer->desc.data;
+    } else if (buffer->desc.type == LORIEBUFFER_REGULAR || buffer->desc.type == LORIEBUFFER_FD)
         buffer->lockedData = buffer->desc.data;
     else if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
         ret = ENOSYS;
@@ -372,7 +422,9 @@ __LIBC_HIDDEN__ int LorieBuffer_unlock(LorieBuffer* buffer) {
         return ENOENT;
     }
 
-    if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
+    if (buffer->dmaBuf) {
+        ret = lorieDmaSync(buffer->fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW);
+    } else if (buffer->desc.type == LORIEBUFFER_AHARDWAREBUFFER) {
         if (__builtin_available(android 26, *))
             ret = AHardwareBuffer_unlock(buffer->desc.buffer, NULL);
     }

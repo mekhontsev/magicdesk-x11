@@ -4,6 +4,14 @@
 #include <dirent.h>
 #include <sys/eventfd.h>
 #include "../lorie/src/main/cpp/lorie/buffer.h"
+#include "../lorie/src/main/cpp/lorie/dma_buffer.h"
+
+static bool failDmaAllocation;
+static int testDmaAllocate(size_t size) {
+    if (failDmaAllocation) { errno = EACCES; return -1; }
+    return lorieDmaAllocate(size);
+}
+#define lorieDmaAllocate testDmaAllocate
 
 static int fakeHardware, released, lockError;
 static AHardwareBuffer* fake = (AHardwareBuffer*)&fakeHardware;
@@ -49,6 +57,7 @@ static void roundTrip(off_t offset) {
     LorieBuffer *source = LorieBuffer_wrapFileDescriptor(3, 8, 2,
         AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM, fd, offset), *received = NULL;
     assert(source && socketpair(AF_UNIX, SOCK_STREAM, 0, sockets) == 0);
+    assert(!LorieBuffer_isDmaBuf(source) && !LorieBuffer_makeDmaBuf(source));
     source->locked = 1; source->lockedData = source->desc.data; source->graphicsImage = (void*)123;
     LorieBuffer_acquire(source);
     assert(LorieBuffer_sendHandleToUnixSocket(source, sockets[0]));
@@ -149,10 +158,60 @@ static void failedLock(void) {
     LorieBuffer_release(regular);
 }
 
+static void dmaUnavailable(void) {
+    LorieBuffer *buffer = LorieBuffer_allocate(19, 7, 5, LORIEBUFFER_REGULAR);
+    assert(buffer);
+    void *original = buffer->desc.data;
+    memset(original, 0x35, 19 * 7 * 4);
+    failDmaAllocation = true;
+    assert(!LorieBuffer_makeDmaBuf(buffer));
+    failDmaAllocation = false;
+    assert(buffer->desc.type == LORIEBUFFER_REGULAR && buffer->desc.data == original &&
+           buffer->desc.stride == 19 && !LorieBuffer_isDmaBuf(buffer));
+    void *pixels;
+    assert(!LorieBuffer_lock(buffer, &pixels) && ((uint32_t *)pixels)[19 * 7 - 1] == 0x35353535);
+    assert(!LorieBuffer_unlock(buffer));
+    LorieBuffer_release(buffer);
+}
+
+static void dmaStorage(void) {
+    int probe = lorieDmaAllocate(4096);
+    if (probe < 0) { puts("SKIP real DMA-heap storage: unavailable to this identity"); return; }
+    close(probe);
+    LorieBuffer *buffer = LorieBuffer_allocate(19, 7, 5, LORIEBUFFER_REGULAR);
+    assert(buffer && !LorieBuffer_isDmaBuf(buffer));
+    const uint64_t id = buffer->desc.id;
+    void *pixels;
+    assert(!LorieBuffer_lock(buffer, &pixels));
+    memset(pixels, 0x35, 19 * 7 * 4);
+    assert(!LorieBuffer_makeDmaBuf(buffer));
+    assert(!LorieBuffer_unlock(buffer));
+    LorieBuffer_acquire(buffer);
+    assert(!LorieBuffer_makeDmaBuf(buffer));
+    LorieBuffer_release(buffer);
+    assert(LorieBuffer_makeDmaBuf(buffer) && LorieBuffer_isDmaBuf(buffer));
+    assert(buffer->desc.id == id && buffer->desc.stride == 64);
+    int fd = fcntl(buffer->fd, F_DUPFD_CLOEXEC, 0);
+    LorieBuffer *reader = LorieBuffer_wrapFileDescriptor(19, 64, 7, 5, fd, 0);
+    assert(reader && LorieBuffer_isDmaBuf(reader));
+    assert(LorieBuffer_makeDmaBuf(buffer));
+    assert(!LorieBuffer_lock(reader, &pixels) && *(uint32_t *)pixels == 0x35353535);
+    assert(!LorieBuffer_unlock(reader));
+    assert(!LorieBuffer_lock(buffer, &pixels));
+    ((uint32_t *)pixels)[6 * 64 + 18] = 0x11223344;
+    assert(!LorieBuffer_unlock(buffer));
+    LorieBuffer_release(buffer);
+    assert(!LorieBuffer_lock(reader, &pixels) && ((uint32_t *)pixels)[6 * 64 + 18] == 0x11223344);
+    assert(!LorieBuffer_unlock(reader));
+    LorieBuffer_release(reader);
+    close(fd);
+    puts("DMA-BUF promotion preserves pixels, identity, live updates and independent FD lifetime");
+}
+
 int main(void) {
     int before = fdCount();
     validation(); roundTrip(0); roundTrip(4); roundTrip(sysconf(_SC_PAGESIZE));
-    fragmentedTransfer(); ancillary(); failedLock();
+    fragmentedTransfer(); ancillary(); dmaUnavailable(); dmaStorage(); failedLock();
     assert(fdCount() == before);
     puts("X11 FD layouts, offsets, wire fragments/EOF, local ownership, FD cleanup and failed AHB locks passed");
 }
