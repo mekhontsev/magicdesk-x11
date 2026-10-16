@@ -91,6 +91,32 @@ Each connection owns its device; teardown cannot release another's resources.
 
 ## Build And Fixtures
 
+### Optional X11 Resource Channel
+
+Accepted X11 streams may begin with the admission byte and one SCM_RIGHTS
+`SOCK_SEQPACKET` endpoint defined in `lorie/resource_protocol.h`. Ordinary `l`/`B`
+X11 handshakes are left untouched. Resource admission does not replace Xauthority.
+Silent or malformed admissions are bounded and rejected on the X thread without
+blocking other clients. The resource protocol uses fixed-width native-endian
+fields between same-host native adapters; X11's own byte order is independent.
+
+The issuer owns the channel's credentials, namespace and storage authorization.
+The engine knows none of those policies: legacy MIT-SHM requests carry only the
+segment ID and read-only flag. Success transfers a backing FD and a lease FD;
+error transfers no FDs. The engine maps the backing and retains the lease through
+the final segment/pixmap reference. A closed or denied channel never falls back
+to native `shmat`, where the same numeric ID could name an unrelated object.
+
+`resource_channel.c` uses notify-FD callbacks and a five-second failure deadline.
+Only the requesting X client is suspended; its request is replayed after the
+reply, including swapped clients. Client teardown cancels pending ownership and
+closes queued rights. Exported mappings outlive the issuing process if their
+lease remains held. Modern ShmAttachFd uses the same mmap/cleanup helper with no
+lease and does not consult the resource channel. There is no per-frame callback,
+extra graphics copy, Java dependency or filesystem-path disclosure in this API.
+
+### Native Fixtures
+
 See the root README for NDK/Windows builds. Termux uses Clang/CMake, Android
 native headers and vulkan-headers. The optional EXA Vulkan copy accelerator loads
 the system driver dynamically and is never a startup requirement. The host owns

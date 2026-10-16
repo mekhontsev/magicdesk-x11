@@ -285,6 +285,7 @@ add_library(LorieNative STATIC
         "xserver/hw/xquartz/keysym2ucs.c"
         "libxcvt/lib/libxcvt.c"
         "lorie/shm/shmem.c"
+        "lorie/resource_channel.c"
         "lorie/data_exchange.c"
         "lorie/InitOutput.c"
         "lorie/cursor.c"
@@ -307,6 +308,7 @@ add_library(LorieNative STATIC
 target_include_directories(LorieNative PRIVATE ${inc} "libxcvt/include")
 # The host supplies JNI. Keep this engine usable without a Java class or VM.
 target_include_directories(LorieNative PUBLIC "lorie")
+target_include_directories(xserver_xext PRIVATE "lorie")
 target_link_options(LorieNative INTERFACE -Wl,--gc-sections)
 target_link_libraries(LorieNative PUBLIC "-Wl,--whole-archive" ${XSERVER_LIBS} "-Wl,--no-whole-archive" android log m ${LORIE_ZLIB})
 if (DEFINED LORIE_ANDROID_LIBDIR)

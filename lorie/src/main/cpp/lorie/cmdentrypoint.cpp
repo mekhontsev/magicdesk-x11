@@ -34,6 +34,7 @@ extern "C" {
 #include "window_icon.h"
 #include "gpu_completion.h"
 #include "socket_io.h"
+#include "resource_channel.h"
 
 #define log(prio, ...) __android_log_print(ANDROID_LOG_ ## prio, "LorieNative", __VA_ARGS__)
 
@@ -525,13 +526,16 @@ int lorieServerConnect(void) {
 void lorieServerAcceptClient(int fd) {
     if (fd < 0) return;
     if (!QueueWorkProc(+[](__unused ClientPtr, void* closure) -> Bool {
-        AddAuthenticatedClientOnOpenFD((int) (intptr_t) closure);
+        lorieResourcesAccept((int) (intptr_t) closure);
         return TRUE;
     }, nullptr, (void*) (intptr_t) fd)) { close(fd); return; }
     lorieWakeServer();
 }
 
-void lorieEmbeddedServerReady(void) { serverCallbacks.ready(serverContext, display); }
+void lorieEmbeddedServerReady(void) {
+    if (!lorieResourcesInit()) FatalError("Cannot initialize client resources");
+    serverCallbacks.ready(serverContext, display);
+}
 
 void lorieHostWindowSize(const LorieWindowConstraints* constraints, int* width, int* height) {
     serverCallbacks.windowSize(constraints, width, height);
