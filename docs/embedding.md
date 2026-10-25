@@ -139,6 +139,13 @@ DISPLAY=:43 build/control-window XID unmap
 DISPLAY=:43 build/control-window XID map
 ```
 
+`get-image-damage-test.c` paints an automatically redirected child and reads its
+parent while subscribing to Damage. It verifies complete ZPixmap/XYPixmap pixels
+and event ordering: SourceValidate must finish before the GetImage reply starts.
+Build with `clang examples/get-image-damage-test.c -o build/get-image-damage-test
+-lxcb -lxcb-composite -lxcb-damage` and run on a 24-bit test server with its normal
+DISPLAY/Xauthority. The fixture creates and destroys only its own windows.
+
 `cursor-window.c` exercises core font cursors, transparent ARGB and animated
 shapes while the pointer is stationary. Build the test client with
 `clang examples/cursor-window.c -o build/cursor-window -lX11 -lXcursor`.

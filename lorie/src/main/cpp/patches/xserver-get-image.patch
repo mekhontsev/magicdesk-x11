@@ -1,0 +1,22 @@
+diff --git a/dix/dispatch.c b/dix/dispatch.c
+--- a/dix/dispatch.c
++++ b/dix/dispatch.c
+@@ -2268,7 +2268,6 @@ DoGetImage(ClientPtr client, int format, Drawable drawable,
+     }
+     if (!(pBuf = calloc(1, length)))
+         return BadAlloc;
+-    WriteReplyToClient(client, sizeof(xGetImageReply), &xgi);
+ 
+     if (pDraw->type == DRAWABLE_WINDOW) {
+         pVisibleRegion = &((WindowPtr) pDraw)->borderClip;
+@@ -2276,6 +2275,10 @@ DoGetImage(ClientPtr client, int format, Drawable drawable,
+                                        IncludeInferiors);
+     }
+ 
++    /* SourceValidate can emit Damage events while painting redirected children.
++     * Finish it before starting the contiguous reply header and pixel payload. */
++    WriteReplyToClient(client, sizeof(xGetImageReply), &xgi);
++
+     if (linesPerBuf == 0) {
+         /* nothing to do */
+     }

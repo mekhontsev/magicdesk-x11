@@ -288,6 +288,7 @@ add_library(LorieNative STATIC
         "lorie/resource_channel.c"
         "lorie/data_exchange.c"
         "lorie/InitOutput.c"
+        "lorie/vidmode.c"
         "lorie/cursor.c"
         "lorie/InitInput.c"
         "lorie/direct_input.c"
@@ -316,4 +317,5 @@ if (DEFINED LORIE_ANDROID_LIBDIR)
 endif()
 target_compile_options(LorieNative PRIVATE ${compile_options} "$<$<COMPILE_LANGUAGE:C>:${c_only_compile_options}>" "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 target_apply_patch(LorieNative "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver.patch")
+target_apply_patch(LorieNative "${CMAKE_CURRENT_SOURCE_DIR}/xserver" "${CMAKE_CURRENT_SOURCE_DIR}/patches/xserver-get-image.patch")
 target_apply_patch(LorieNative "${CMAKE_CURRENT_SOURCE_DIR}/libepoxy" "${CMAKE_CURRENT_SOURCE_DIR}/patches/libepoxy.patch")

@@ -41,6 +41,7 @@
 #include "window_model.h"
 #include "dma_copy.h"
 #include "screen_mode.h"
+#include "vidmode.h"
 
 #define DRM_FORMAT_MOD_LINEAR 0
 
@@ -753,6 +754,7 @@ void InitOutput(ScreenInfo * screen_info, int argc, char **argv) {
         FatalError("Couldn't add screen\n");
     }
     lorieWindowModelInit(pScreenPtr);
+    lorieVidModeRegister();
 }
 
 // This Present implementation mostly copies the one from `present/present_fake.c`
