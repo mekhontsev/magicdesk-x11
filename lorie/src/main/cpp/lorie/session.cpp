@@ -288,6 +288,11 @@ LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* co
 
 bool lorieConnectionConnect(LorieConnection* connection, int fd) { return connection->connect(fd); }
 
+const char* lorieConnectionGraphicsDescription(LorieConnection* connection) {
+    auto& renderer = connection->renderer;
+    return renderer.graphics->description ? renderer.graphics->description(renderer.graphicsDevice) : "unavailable";
+}
+
 bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativeWindow* window, bool release) {
     return connection->renderer.setOutputSurface(output, window, release);
 }

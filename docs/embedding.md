@@ -32,6 +32,10 @@ on the creating Looper. Native callbacks run on that same thread and borrow
 their string/icon memory only for their duration. A data callback owns its FD.
 No per-frame callback into Java is required. The host supplies any JVM adapter.
 
+`lorieConnectionGraphicsDescription` borrows the host backend's optional immutable
+startup description until connection destruction. Reading it performs no driver
+probe; it is diagnostic metadata, not a rendering-capability admission check.
+
 `embedded.h` exposes named output/input/window commands and structured window
 snapshots. `output_commands.cpp` alone translates their arguments to the private
 `output_command.h` wire representation. Commands use stack values and the existing

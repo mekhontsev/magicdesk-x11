@@ -95,6 +95,8 @@ enum LorieDataChannel { LORIE_DATA_CLIPBOARD, LORIE_DATA_DRAG };
 
 // Calls, including destroy, must be serialized on the creating Looper thread.
 LorieConnection* lorieConnectionCreate(const LorieCallbacks* callbacks, void* context, const LorieGraphics* graphics);
+/* Cached startup metadata only; borrowed until connection destruction. */
+const char* lorieConnectionGraphicsDescription(LorieConnection* connection);
 bool lorieConnectionConnect(LorieConnection* connection, int ownedDescriptor);
 // Borrows window during the call; retains its own reference until acknowledged release.
 bool lorieConnectionSurface(LorieConnection* connection, uint32_t output, ANativeWindow* window, bool release);

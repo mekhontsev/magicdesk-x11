@@ -18,6 +18,8 @@ typedef struct {
 typedef struct {
     void *(*create)(void);
     void (*destroy)(void *device);
+    /* Optional immutable startup description, borrowed until device destruction. */
+    const char *(*description)(void *device);
     void *(*image)(void *device, AHardwareBuffer *buffer, const void *pixels,
         unsigned width, unsigned height, size_t stride, unsigned androidFormat);
     void (*releaseImage)(void *image);
