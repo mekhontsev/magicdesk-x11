@@ -29,6 +29,7 @@ typedef struct WindowImage {
 } WindowImage;
 
 #define MAX_FAMILY_LAYERS LORIE_MAX_FAMILY_LAYERS
+#define MAX_OUTPUT_BUTTON 9
 typedef struct OutputSelection {
     struct OutputSelection* next;
     uint32_t id;
@@ -42,7 +43,8 @@ typedef struct OutputSelection {
     uint32_t presentation;
     int width, height;
     int contentWidth, contentHeight;
-    uint8_t keys[32], buttons;
+    uint8_t keys[32];
+    uint16_t buttons;
     unsigned layerCount;
     lorieEvent layers[MAX_FAMILY_LAYERS];
     uint64_t revision;
@@ -69,7 +71,8 @@ static void outputKey(OutputSelection* output, int key, Bool down) {
 }
 
 static void outputButton(OutputSelection* output, int button, Bool down) {
-    uint8_t mask = 1u << button;
+    if (button < 1 || button > MAX_OUTPUT_BUTTON) return;
+    uint16_t mask = 1u << button;
     if (!!(output->buttons & mask) == !!down) return;
     if (down) output->buttons |= mask;
     else output->buttons &= ~mask;
@@ -84,11 +87,11 @@ static void releaseInput(OutputSelection* output) {
     // A destroyed client cannot receive the host's later key/button-up. Release
     // this output's leases now, without releasing a key still held by another view.
     for (int key = 8; key <= 255; key++) outputKey(output, key, FALSE);
-    for (int button = 1; button <= 7; button++) outputButton(output, button, FALSE);
+    for (int button = 1; button <= MAX_OUTPUT_BUTTON; button++) outputButton(output, button, FALSE);
 }
 
 Bool lorieWindowGestureAllowed(XID window, unsigned button) {
-    if (button > 7) return FALSE;
+    if (button > MAX_OUTPUT_BUTTON) return FALSE;
     for (OutputSelection* output = selections; output; output = output->next)
         if (!output->dead && !borrowed(output) && output->window == window
                 && (button ? (output->buttons & (1u << button)) : output->buttons)) return TRUE;
@@ -96,7 +99,7 @@ Bool lorieWindowGestureAllowed(XID window, unsigned button) {
 }
 
 void lorieReleaseOutputButton(uint32_t id, uint32_t window, int button) {
-    if (button < 1 || button > 7) return;
+    if (button < 1 || button > MAX_OUTPUT_BUTTON) return;
     for (OutputSelection* output = selections; output; output = output->next)
         if (output->id == id && output->window == window) {
             if (button == 1) lorieDirectInputRelease(id);
@@ -329,7 +332,7 @@ void lorieOutputCommand(const lorieEvent* event) {
             if (h) valuator_mask_set_double(&mask, 2, h);
             if (v) valuator_mask_set_double(&mask, 3, v);
             if (h || v) QueuePointerEvents(lorieMouse, MotionNotify, 0, POINTER_RELATIVE, &mask);
-        } else if (event->output.detail >= 1 && event->output.detail <= 7)
+        } else
             outputButton(output, event->output.detail, event->output.down);
     } else if (event->output.operation == LORIE_OUTPUT_KEY &&
             event->output.detail >= 8 && event->output.detail <= 255) {

@@ -11,12 +11,16 @@ ScreenPtr pScreenPtr;
 TimeStamp currentTime;
 static WindowRec catcherWindow;
 static int presses, releases, raises, motions;
+static int buttonPresses[MAX_OUTPUT_BUTTON + 1], buttonReleases[MAX_OUTPUT_BUTTON + 1];
 static Bool exporting;
 static xEvent notification;
 static int notifications;
 static LorieDataEvent lastData;
 static int dataEvents;
 void lorieDirectInputRelease(uint32_t output) { (void)output; }
+void QueueKeyboardEvents(DeviceIntPtr device, int type, int key) {
+    (void)device; (void)type; (void)key; assert(!"unexpected keyboard event");
+}
 
 pixman_bool_t pixman_region_contains_point(const pixman_region16_t* region, int x, int y, pixman_box16_t* box) {
     *box = region->extents;
@@ -82,7 +86,10 @@ void QueuePointerEvents(DeviceIntPtr device, int type, int button, int flags,
         motions++;
         return;
     }
-    assert(button == 1);
+    assert(button >= 1 && button <= MAX_OUTPUT_BUTTON);
+    if (type == ButtonPress) buttonPresses[button]++;
+    else { assert(type == ButtonRelease); buttonReleases[button]++; }
+    if (button != 1) return;
     if (type == ButtonPress) presses++;
     else {
         assert(type == ButtonRelease);
@@ -118,7 +125,7 @@ int main(void) {
     lorieReleaseOutputButton(1, 99, 1);
     lorieReleaseOutputButton(99, 100, 1);
     lorieReleaseOutputButton(1, 100, 0);
-    lorieReleaseOutputButton(1, 100, 8);
+    lorieReleaseOutputButton(1, 100, MAX_OUTPUT_BUTTON + 1);
     assert(source.buttons != 0 && releases == 3);
 
     // Finishing one drag must not release another view's held button.
@@ -142,6 +149,25 @@ int main(void) {
     releaseExportPointer();
     assert(releases == 5 && raises == 1 && motions == 1);
     puts("output input leases: ok");
+    for (int button = 8; button <= 9; button++) {
+        outputButton(&source, button, TRUE);
+        outputButton(&source, button, TRUE);
+        outputButton(&other, button, TRUE);
+        assert(buttonPresses[button] == 1 && buttonReleases[button] == 0);
+        assert(lorieWindowGestureAllowed(source.window, button));
+        lorieReleaseOutputButton(source.id, 99, button);
+        assert(source.buttons & (1u << button));
+        releaseInput(&source);
+        assert(source.buttons == 0 && other.buttons != 0 && buttonReleases[button] == 0);
+        lorieReleaseOutputInput();
+        lorieReleaseOutputInput();
+        assert(other.buttons == 0 && buttonReleases[button] == 1);
+        assert(!lorieWindowGestureAllowed(source.window, button));
+    }
+    outputButton(&source, 0, TRUE);
+    outputButton(&source, MAX_OUTPUT_BUTTON + 1, TRUE);
+    assert(source.buttons == 0);
+    puts("side buttons retain per-output leases and release exactly once: ok");
     catcher = (1U << CLIENTOFFSET) | 1;
     catcherWindow.drawable.id = catcher;
     xdnd = 123;
